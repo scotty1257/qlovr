@@ -33,6 +33,9 @@ pub struct TagDef {
     pub color_index: usize,
     pub highlight_on: bool,
     pub filter_on: bool,
+    /// Part of the severity ladder: level tags rank least to most severe in list order, and
+    /// filtering on one also takes in every level tag after it.
+    pub level: bool,
 
     #[serde(skip)]
     pub matcher: Option<Arc<Matcher>>,
@@ -48,6 +51,7 @@ impl Default for TagDef {
             color_index: 0,
             highlight_on: true,
             filter_on: false,
+            level: false,
             matcher: None,
         }
     }
@@ -132,6 +136,34 @@ impl TagStore {
         self.tags.push(tag);
         self.save();
         self.tags.len() - 1
+    }
+
+    /// The tags whose lines the filter shows, in list order: every non-level tag with its filter
+    /// on, plus the first level tag with its filter on and every level tag after it.
+    pub fn filtering_ids(&self) -> Vec<Uuid> {
+        let mut ladder_reached = false;
+        self.tags
+            .iter()
+            .filter(|t| {
+                if !t.level {
+                    return t.filter_on;
+                }
+                ladder_reached |= t.filter_on;
+                ladder_reached
+            })
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Swaps the tag at `index` with its neighbour `delta` (±1) places away. Returns the tag's new
+    /// index, or `None` at either end. Doesn't save.
+    pub fn move_tag(&mut self, index: usize, delta: i64) -> Option<usize> {
+        let target = index.checked_add_signed(delta as isize)?;
+        if index >= self.tags.len() || target >= self.tags.len() {
+            return None;
+        }
+        self.tags.swap(index, target);
+        Some(target)
     }
 
     pub fn remove(&mut self, index: usize) {

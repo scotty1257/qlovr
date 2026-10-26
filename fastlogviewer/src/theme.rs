@@ -272,11 +272,18 @@ pub fn chip_label(_: &Theme, status: button::Status) -> button::Style {
 }
 
 /// The H / F switches inside a chip: filled with the tag colour when on.
-pub fn chip_switch(on: bool, color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+/// `implied` is a level tag's F switch that is off but included by a less severe level's filter:
+/// outlined rather than filled.
+pub fn chip_switch(
+    on: bool,
+    implied: bool,
+    color: Color,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
         let mut style = match (on, hovered) {
             (true, _) => button_style(color, ON_ACCENT, color),
+            (false, _) if implied => button_style(alpha(color, 0.18), TEXT, color),
             (false, true) => button_style(alpha(color, 0.22), TEXT, alpha(color, 0.0)),
             (false, false) => button_style(alpha(color, 0.0), TEXT_DIM, alpha(color, 0.0)),
         };

@@ -38,6 +38,11 @@ them with a 50 ms tick, but only while something is still running.
   which line each screen row shows so clicks land on the right one.
 - **Tags:** saved patterns, each with its own colour, that can highlight matches, filter lines, or
   both. Stored in `%APPDATA%\FastLogViewer\tags.json`.
+- **Severity levels:** a tag can be marked as a severity level in its editor. Level tags rank
+  least to most severe, left to right in the tag bar, and the editor's ◀ ▶ buttons move them.
+  Turning on F for a level also shows every level to its right: F on INFO shows INFO, WARNING and
+  ERROR; F on ERROR shows only ERROR. Levels it includes this way get an outlined F. Other tags
+  keep their own F switch. The rule is `TagStore::filtering_ids` in core.
 - **Patterns (Ctrl+M):** semantic zoom. Lines are clustered into templates; Enter or a double-click
   zooms into one template's lines; Esc steps back out a level. While zoomed in, the search box also
   accepts slot queries such as `slot2 > 2000 AND slot1 = warn`.

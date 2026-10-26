@@ -229,17 +229,7 @@ impl App {
 
         self.start_match_scan();
         self.view.set_active_filter(None);
-
-        let filtered: Vec<Uuid> = self
-            .tag_store
-            .tags
-            .iter()
-            .filter(|t| t.filter_on)
-            .map(|t| t.id)
-            .collect();
-        for id in filtered {
-            self.start_tag_filter(id);
-        }
+        self.sync_tag_filters();
     }
 
     /// Cancels every worker and drops our handle on the mapping. Unlike the C#, nothing has to be
@@ -325,8 +315,29 @@ impl App {
 
     // ----------------------------------------------------------- tag filtering
 
-    fn start_tag_filter(&mut self, id: Uuid) {
-        let Some(file) = self.file.clone() else { return };
+    /// Runs an index for exactly the tags the filter includes (see `TagStore::filtering_ids`),
+    /// rebuilding the union if that changed anything.
+    fn sync_tag_filters(&mut self) {
+        let wanted = self.tag_store.filtering_ids();
+        let stale: Vec<Uuid> =
+            self.tag_indexes.keys().filter(|id| !wanted.contains(id)).copied().collect();
+        let mut changed = !stale.is_empty();
+        for id in stale {
+            self.stop_tag_filter(id);
+        }
+        for id in wanted {
+            if !self.tag_indexes.contains_key(&id) {
+                changed |= self.start_tag_index(id);
+            }
+        }
+        if changed {
+            self.rebuild_union();
+        }
+    }
+
+    /// Starts scanning for one tag's matches. Returns whether it started.
+    fn start_tag_index(&mut self, id: Uuid) -> bool {
+        let Some(file) = self.file.clone() else { return false };
         let Some(matcher) = self
             .tag_store
             .tags
@@ -334,10 +345,10 @@ impl App {
             .find(|t| t.id == id)
             .and_then(|t| t.matcher.clone())
         else {
-            return;
+            return false;
         };
         if !matcher.is_valid() || matcher.is_empty() {
-            return;
+            return false;
         }
         self.stop_tag_filter(id);
 
@@ -346,7 +357,7 @@ impl App {
         let ct = CancelToken::new();
         self.tag_cts.insert(id, ct.clone());
         std::thread::spawn(move || index.build(&file, &ct));
-        self.rebuild_union();
+        true
     }
 
     fn stop_tag_filter(&mut self, id: Uuid) {
@@ -848,21 +859,14 @@ impl App {
                 self.sync_view_tags();
             }
             ChipAction::ToggleFilter => {
-                let on = !self.tag_store.tags[index].filter_on;
-                self.tag_store.tags[index].filter_on = on;
+                self.tag_store.tags[index].filter_on = !self.tag_store.tags[index].filter_on;
                 self.tag_store.save();
-                if on {
-                    self.start_tag_filter(id);
-                } else {
-                    self.stop_tag_filter(id);
-                    self.rebuild_union();
-                }
+                self.sync_tag_filters();
                 self.sync_view_tags();
             }
             ChipAction::Remove => {
-                self.stop_tag_filter(id);
-                self.rebuild_union();
                 self.tag_store.remove(index);
+                self.sync_tag_filters();
                 self.sync_view_tags();
             }
             ChipAction::Edit => {
@@ -884,16 +888,13 @@ impl App {
                     popup.filter,
                     Some(popup.color_index),
                 );
-                let id = self.tag_store.tags[index].id;
-                if popup.filter {
-                    self.start_tag_filter(id);
-                }
+                self.tag_store.tags[index].level = popup.level;
+                self.tag_store.save();
             }
             Some(id) => {
                 let Some(index) = self.tag_store.tags.iter().position(|t| t.id == id) else {
                     return;
                 };
-                let was_filter_on = self.tag_store.tags[index].filter_on;
                 {
                     let tag = &mut self.tag_store.tags[index];
                     tag.label = popup.result_label();
@@ -902,19 +903,31 @@ impl App {
                     tag.highlight_on = popup.highlight;
                     tag.filter_on = popup.filter;
                     tag.color_index = popup.color_index;
+                    tag.level = popup.level;
                     tag.rebuild_matcher();
                 }
                 self.tag_store.save();
 
-                if popup.filter {
-                    self.start_tag_filter(id); // the pattern may have changed -> restart
-                } else if was_filter_on {
+                // The pattern may have changed, so drop the old index; the sync restarts it.
+                if self.tag_indexes.contains_key(&id) {
                     self.stop_tag_filter(id);
                     self.rebuild_union();
                 }
             }
         }
+        self.sync_tag_filters();
         self.sync_view_tags();
+    }
+
+    /// Moves the tag open in the editor one place left or right, which is how levels are ranked.
+    fn move_tag(&mut self, delta: i64) {
+        let Some(id) = self.popup.as_ref().and_then(|p| p.editing) else { return };
+        let Some(index) = self.tag_store.tags.iter().position(|t| t.id == id) else { return };
+        if self.tag_store.move_tag(index, delta).is_some() {
+            self.tag_store.save();
+            self.sync_tag_filters();
+            self.sync_view_tags();
+        }
     }
 
     // ------------------------------------------------------------------ update
@@ -979,6 +992,7 @@ impl App {
                         self.commit_popup(popup);
                     }
                     PopupOutcome::Cancelled => self.popup = None,
+                    PopupOutcome::Move(delta) => self.move_tag(delta),
                 }
             }
             Message::Goto(message) => match message {
@@ -1331,8 +1345,9 @@ impl App {
             .spacing(6)
             .align_y(Alignment::Center)
             .padding([0, 12]);
+        let filtering = self.tag_store.filtering_ids();
         for tag in &self.tag_store.tags {
-            chips = chips.push(tag_chip(tag, Message::Chip));
+            chips = chips.push(tag_chip(tag, filtering.contains(&tag.id), Message::Chip));
         }
         chips = chips.push(with_tip(
             button(

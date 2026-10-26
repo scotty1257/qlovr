@@ -44,17 +44,20 @@ pub fn with_tip<'a, Message: 'a>(
 }
 
 /// `● label  H F ×` — clicking the label edits the tag, H and F toggle highlight and filter.
+/// `in_filter` says whether the filter includes the tag, which for a level tag can be true with
+/// its own F off.
 pub fn tag_chip<'a, Message: Clone + 'a>(
     tag: &'a TagDef,
+    in_filter: bool,
     on_action: impl Fn(Uuid, ChipAction) -> Message + 'a,
 ) -> Element<'a, Message> {
     let color = tag_color(tag);
-    let switch = |label: &'static str, on: bool, action: ChipAction| {
+    let switch = |label: &'static str, on: bool, implied: bool, action: ChipAction| {
         button(text(label).size(11).font(theme::MONO).center())
             .width(20)
             .height(20)
             .padding(0)
-            .style(theme::chip_switch(on, color))
+            .style(theme::chip_switch(on, implied, color))
             .on_press(on_action(tag.id, action))
     };
 
@@ -74,13 +77,17 @@ pub fn tag_chip<'a, Message: Clone + 'a>(
         row![
             with_tip(label, "Edit tag", tooltip::Position::Bottom),
             with_tip(
-                switch("H", tag.highlight_on, ChipAction::ToggleHighlight),
+                switch("H", tag.highlight_on, false, ChipAction::ToggleHighlight),
                 "Highlight matches",
                 tooltip::Position::Bottom,
             ),
             with_tip(
-                switch("F", tag.filter_on, ChipAction::ToggleFilter),
-                "Show only matching lines",
+                switch("F", tag.filter_on, in_filter, ChipAction::ToggleFilter),
+                if tag.level {
+                    "Show this level and every level to its right"
+                } else {
+                    "Show only matching lines"
+                },
                 tooltip::Position::Bottom,
             ),
             button(text("×").size(14).center())
@@ -143,6 +150,9 @@ pub enum PopupMessage {
     ToggleIgnoreCase,
     Highlight(bool),
     Filter(bool),
+    Level(bool),
+    /// Move the tag one place left (-1) or right (+1) in the tag bar.
+    Move(i64),
     Color(usize),
     Accept,
     Cancel,
@@ -152,6 +162,8 @@ pub enum PopupOutcome {
     Open,
     Accepted,
     Cancelled,
+    /// Move the tag being edited; applied right away, the dialog stays open.
+    Move(i64),
 }
 
 /// The new/edit tag dialog.
@@ -164,6 +176,7 @@ pub struct TagEditPopup {
     pub ignore_case: bool,
     pub highlight: bool,
     pub filter: bool,
+    pub level: bool,
     pub color_index: usize,
 }
 
@@ -176,6 +189,7 @@ impl TagEditPopup {
             ignore_case: false,
             highlight: true,
             filter: false,
+            level: false,
             color_index: default_color_index,
         }
     }
@@ -188,6 +202,7 @@ impl TagEditPopup {
             ignore_case: tag.ignore_case,
             highlight: tag.highlight_on,
             filter: tag.filter_on,
+            level: tag.level,
             color_index: tag.color_index,
         }
     }
@@ -217,6 +232,8 @@ impl TagEditPopup {
             PopupMessage::ToggleIgnoreCase => self.ignore_case = !self.ignore_case,
             PopupMessage::Highlight(on) => self.highlight = on,
             PopupMessage::Filter(on) => self.filter = on,
+            PopupMessage::Level(on) => self.level = on,
+            PopupMessage::Move(delta) => return PopupOutcome::Move(delta),
             PopupMessage::Color(index) => self.color_index = index,
             PopupMessage::Accept if self.can_accept() => return PopupOutcome::Accepted,
             PopupMessage::Accept => {}
@@ -275,8 +292,37 @@ impl TagEditPopup {
                 .size(16)
                 .text_size(theme::UI_SIZE)
                 .style(theme::check),
+            with_tip(
+                checkbox(self.level)
+                    .label("Severity level")
+                    .on_toggle(PopupMessage::Level)
+                    .size(16)
+                    .text_size(theme::UI_SIZE)
+                    .style(theme::check),
+                "Levels rank least to most severe, left to right in the tag bar.
+                 Filtering a level also shows every level to its right.",
+                tooltip::Position::Top,
+            ),
         ]
         .spacing(24);
+
+        // Only a saved tag has a place in the tag bar to move.
+        let move_button = |label: &'static str, delta: i64| {
+            button(text(label).size(theme::SMALL_SIZE).center())
+                .width(30)
+                .height(26)
+                .padding(0)
+                .style(theme::secondary)
+                .on_press_maybe(self.editing.map(|_| PopupMessage::Move(delta)))
+        };
+        let position_row = row![
+            field_label("Position in tag bar"),
+            space().width(Length::Fill),
+            with_tip(move_button("◀", -1), "Less severe", tooltip::Position::Top),
+            with_tip(move_button("▶", 1), "More severe", tooltip::Position::Top),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
 
         let body = column![
             text(title).size(17),
@@ -293,6 +339,7 @@ impl TagEditPopup {
             ]
             .spacing(6),
             checkbox_row,
+            position_row,
             column![field_label("Colour"), swatches].spacing(8),
             space().height(2),
             dialog_buttons(
