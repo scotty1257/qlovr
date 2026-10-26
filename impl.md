@@ -27,6 +27,11 @@ them with a 50 ms tick, but only while something is still running.
 - **Search:** plain text or regex, with a case toggle, live match count and F3 / Shift+F3 to step
   between matches (wraps at either end). Typing is debounced by 250 ms.
 - **Filter (Ctrl+H):** shows only matching lines. It combines with tag filters as an intersection.
+- **Exclude:** flips the filter so it hides matching lines instead of keeping them (and turns
+  Filter on). It works in plain-text and regex mode. It's backed by `ComplementIndex` in core, which
+  answers each lookup by binary search over the match list instead of building a copy. The view
+  stays unfiltered until the scan finishes, because otherwise lines not yet tested would slip
+  through.
 - **Tags:** saved patterns, each with its own colour, that can highlight matches, filter lines, or
   both. Stored in `%APPDATA%\FastLogViewer\tags.json`.
 - **Patterns (Ctrl+M):** semantic zoom. Lines are clustered into templates; Enter or a double-click
@@ -81,7 +86,7 @@ them with a 50 ms tick, but only while something is still running.
 
 | Check | Result |
 |---|---|
-| `cargo test` (core suites) | All pass |
+| `cargo test` (core suites, incl. `complement_index`) | All pass |
 | `cargo build` / `cargo build --release` | Clean, no warnings |
 | `cargo clippy -p fastlogviewer` | One `manual_is_multiple_of` hint in `format.rs` (code moved over unchanged) |
 | Manual run on `sample.log` (200k lines, 11.3 MB) | Viewing, search + F3, filter, patterns mode, tag create + highlight, tag dialog, empty state, modal click-blocking, release build |
@@ -98,7 +103,9 @@ the scrollbar thumb, and very large (multi-GB) files with the new renderer.
    `shot_templates.png` still show the old egui UI.
 3. **The file dialog blocks.** `rfd::FileDialog` runs synchronously inside `update`, as it did
    under egui. It works on Windows, but the event loop pauses while the dialog is open.
-4. **Tab doesn't move focus.** iced has no Tab-key focus navigation for buttons, so the dialogs
+4. **F3 doesn't fit Exclude.** With Exclude on, F3 still steps through the (now hidden) matches,
+   so the selection lands on the nearest kept line instead.
+5. **Tab doesn't move focus.** iced has no Tab-key focus navigation for buttons, so the dialogs
    are mouse- and Enter-driven.
 
 ## Possible next steps

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastlogviewer_core::{
-    CancelToken, FilterIndex, IntersectionIndex, LogFile, LogTemplate, LogViewMode, MatchIndex,
+    CancelToken, ComplementIndex, FilterIndex, IntersectionIndex, LogFile, LogTemplate, LogViewMode, MatchIndex,
     Matcher, SlotFilterIndex, SlotQuery, TagStore, TemplateIndex, UnionFilterIndex, TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
@@ -65,6 +65,7 @@ pub enum Message {
     ToggleRegex,
     ToggleCase,
     ToggleFilter,
+    ToggleExclude,
     TogglePatterns,
     OpenDialog,
     NewTag,
@@ -97,6 +98,8 @@ pub struct App {
     regex_on: bool,
     case_on: bool,
     filter_on: bool,
+    /// Filter shows the lines that do *not* match.
+    exclude_on: bool,
     count_text: String,
     count_error: bool,
 
@@ -141,6 +144,7 @@ impl App {
             regex_on: false,
             case_on: false,
             filter_on: false,
+            exclude_on: false,
             count_text: String::new(),
             count_error: false,
             matcher: None,
@@ -394,17 +398,18 @@ impl App {
             return;
         };
 
-        let ad_hoc_live = self.filter_on && self.matches.is_some();
+        let ad_hoc = self.ad_hoc_filter();
+        let ad_hoc_live = ad_hoc.is_some();
         let tag_on = self.tag_union.as_ref().is_some_and(|u| u.is_complete());
         let ad_hoc_complete = self.matches.as_ref().is_some_and(|m| m.is_complete());
 
         let (mut result, base): (Option<Arc<dyn FilterIndex>>, Base) =
             if ad_hoc_live && tag_on && ad_hoc_complete {
-                let matches = self.matches.clone().unwrap();
+                let ad_hoc = ad_hoc.unwrap();
                 let union = self.tag_union.clone().unwrap();
                 (
                     Some(Arc::new(IntersectionIndex::new(
-                        matches.as_ref(),
+                        ad_hoc.as_ref(),
                         union.as_ref(),
                         file.length(),
                     ))),
@@ -417,11 +422,8 @@ impl App {
                     Base::TagUnion,
                 )
             } else if ad_hoc_live {
-                // Live, incremental.
-                (
-                    Some(self.matches.clone().unwrap() as Arc<dyn FilterIndex>),
-                    Base::AdHoc,
-                )
+                // Live, incremental (exclude only appears once the scan is complete).
+                (ad_hoc, Base::AdHoc)
             } else {
                 (None, Base::None)
             };
@@ -454,6 +456,24 @@ impl App {
         }
 
         self.view.set_active_filter(result);
+    }
+
+    /// What the search box contributes to the filter: its matches, or with Exclude on, every line
+    /// that isn't one. The complement waits for the scan to finish — until then lines that haven't
+    /// been tested yet would wrongly pass — so meanwhile the view stays unfiltered.
+    fn ad_hoc_filter(&self) -> Option<Arc<dyn FilterIndex>> {
+        if !self.filter_on {
+            return None;
+        }
+        let matches = self.matches.clone()?;
+        if !self.exclude_on {
+            return Some(matches);
+        }
+        if !matches.is_complete() {
+            return None;
+        }
+        let lines = self.file.as_ref()?.line_count();
+        Some(Arc::new(ComplementIndex::new(matches, lines)))
     }
 
     // ------------------------------------------------------------ semantic zoom
@@ -501,15 +521,15 @@ impl App {
     fn current_scope_filter(&self) -> Option<Arc<dyn FilterIndex>> {
         let file = self.file.as_ref()?;
 
-        let ad_hoc_live =
-            self.filter_on && self.matches.as_ref().is_some_and(|m| m.is_complete());
+        let ad_hoc = self
+            .ad_hoc_filter()
+            .filter(|_| self.matches.as_ref().is_some_and(|m| m.is_complete()));
         let tag_on = self.tag_union.as_ref().is_some_and(|u| u.is_complete());
 
-        if ad_hoc_live && tag_on {
-            let matches = self.matches.clone().unwrap();
+        if let (Some(ad_hoc), true) = (&ad_hoc, tag_on) {
             let union = self.tag_union.clone().unwrap();
             return Some(Arc::new(IntersectionIndex::new(
-                matches.as_ref(),
+                ad_hoc.as_ref(),
                 union.as_ref(),
                 file.length(),
             )));
@@ -517,10 +537,7 @@ impl App {
         if tag_on {
             return Some(self.tag_union.clone().unwrap());
         }
-        if ad_hoc_live {
-            return Some(self.matches.clone().unwrap());
-        }
-        None
+        ad_hoc
     }
 
     fn show_template_list(&mut self) {
@@ -780,7 +797,9 @@ impl App {
             self.count_error = true;
             self.count_text = "invalid slot filter".to_string();
         } else if let Some(matches) = self.matches.clone() {
-            self.count_text = if matches.is_complete() {
+            self.count_text = if matches.is_complete() && self.filter_on && self.exclude_on {
+                format!("{} lines hidden", thousands(matches.count() as u64))
+            } else if matches.is_complete() {
                 format!("{} matches", thousands(matches.count() as u64))
             } else {
                 format!("{} matches · scanning", thousands(matches.count() as u64))
@@ -928,6 +947,14 @@ impl App {
             }
             Message::ToggleFilter => {
                 self.filter_on = !self.filter_on;
+                self.recompute_active_filter();
+            }
+            Message::ToggleExclude => {
+                // Excluding only means something through the filter, so turning it on implies it.
+                self.exclude_on = !self.exclude_on;
+                if self.exclude_on {
+                    self.filter_on = true;
+                }
                 self.recompute_active_filter();
             }
             Message::TogglePatterns => self.toggle_semantic_zoom(),
@@ -1225,6 +1252,13 @@ impl App {
                     self.filter_on,
                     Message::ToggleFilter,
                     "Show only matching lines  (Ctrl+H)"
+                ),
+                toggle(
+                    "Exclude",
+                    false,
+                    self.exclude_on,
+                    Message::ToggleExclude,
+                    "Filter out matching lines instead of keeping them"
                 ),
             ]
             .spacing(2),

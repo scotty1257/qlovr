@@ -133,3 +133,49 @@ impl FilterIndex for IntersectionIndex {
         self.lines.index_at_or_after(line)
     }
 }
+
+/// Every line *not* in `source` (NOT), for "filter away from" a search. Nothing is copied: each
+/// lookup is a binary search over the source, so the complement of a million matches costs nothing
+/// to build. The source must be complete — an unfinished scan would let not-yet-found matches
+/// through.
+pub struct ComplementIndex {
+    source: Arc<dyn FilterIndex>,
+    total_lines: usize,
+}
+
+impl ComplementIndex {
+    pub fn new(source: Arc<dyn FilterIndex>, total_lines: usize) -> Self {
+        ComplementIndex {
+            source,
+            total_lines,
+        }
+    }
+}
+
+impl FilterIndex for ComplementIndex {
+    fn count(&self) -> usize {
+        self.total_lines.saturating_sub(self.source.count())
+    }
+
+    /// The i-th kept line is `i + j`, where `j` is how many source lines come before it. Because
+    /// source lines are sorted and distinct, `source[j] - j` never decreases, so `j` is the first
+    /// position where it exceeds `i`.
+    fn get(&self, i: usize) -> i32 {
+        let (mut lo, mut hi) = (0usize, self.source.count());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if (self.source.get(mid) as i64 - mid as i64) <= i as i64 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        (i + lo) as i32
+    }
+
+    /// Kept lines before `line` = all lines before it minus the source lines before it.
+    fn index_at_or_after(&self, line: i32) -> usize {
+        let line = line.clamp(0, self.total_lines as i32);
+        line as usize - self.source.index_at_or_after(line)
+    }
+}

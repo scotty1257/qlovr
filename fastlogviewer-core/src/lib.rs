@@ -23,7 +23,7 @@ pub mod tags;
 pub mod templates;
 
 pub use cancel::CancelToken;
-pub use filter::{FilterIndex, IntersectionIndex, UnionFilterIndex};
+pub use filter::{ComplementIndex, FilterIndex, IntersectionIndex, UnionFilterIndex};
 pub use line_numbers::LineNumberList;
 pub use log_file::LogFile;
 pub use match_index::MatchIndex;
