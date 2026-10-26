@@ -1,0 +1,13 @@
+[package]
+name = "fastlogviewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+eframe = "0.30.0"
+fastlogviewer-core = { path = "../fastlogviewer-core" }
+raw-window-handle = "0.6"
+rfd = "0.17.2"
+uuid = { version = "1.26.1", features = ["v4"] }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }

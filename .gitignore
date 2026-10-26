@@ -1,0 +1,30 @@
+# Cargo build output
+/target/
+
+# rustfmt backup files
+**/*.rs.bk
+
+# MSVC debug symbols (Windows builds)
+*.pdb
+
+# Coverage and profiling output (cargo-llvm-cov, tarpaulin, PGO)
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+cobertura.xml
+
+# cargo-mutants output
+mutants.out*/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
+.env.*

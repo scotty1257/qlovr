@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["fastlogviewer-core", "fastlogviewer"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+
+# Release profile tuned for the scanning hot paths (SWAR line/substring scans).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
