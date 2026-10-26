@@ -32,6 +32,10 @@ them with a 50 ms tick, but only while something is still running.
   answers each lookup by binary search over the match list instead of building a copy. The view
   stays unfiltered until the scan finishes, because otherwise lines not yet tested would slip
   through.
+- **Wrap:** the Wrap button (Alt+Z) wraps every line to the window width and turns off horizontal
+  scrolling. Enter or a double-click on a line wraps just that line (again to unwrap), so a few
+  long lines can be opened up in place. Scrolling still moves by whole lines; the canvas records
+  which line each screen row shows so clicks land on the right one.
 - **Tags:** saved patterns, each with its own colour, that can highlight matches, filter lines, or
   both. Stored in `%APPDATA%\FastLogViewer\tags.json`.
 - **Patterns (Ctrl+M):** semantic zoom. Lines are clustered into templates; Enter or a double-click
@@ -105,7 +109,9 @@ the scrollbar thumb, and very large (multi-GB) files with the new renderer.
    under egui. It works on Windows, but the event loop pauses while the dialog is open.
 4. **F3 doesn't fit Exclude.** With Exclude on, F3 still steps through the (now hidden) matches,
    so the selection lands on the nearest kept line instead.
-5. **Tab doesn't move focus.** iced has no Tab-key focus navigation for buttons, so the dialogs
+5. **A wrapped line taller than the window shows only its start**, because scrolling moves by
+   whole lines. Lines are capped at `MAX_LINE_BYTES` anyway, but a very long one can be cut off.
+6. **Tab doesn't move focus.** iced has no Tab-key focus navigation for buttons, so the dialogs
    are mouse- and Enter-driven.
 
 ## Possible next steps

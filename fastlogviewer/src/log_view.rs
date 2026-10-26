@@ -7,7 +7,8 @@
 //! [`ViewMessage`] the app applies with `&mut`; the only thing written back during a draw is the
 //! viewport size, which the keyboard paging in `update` needs and only layout knows.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,7 +45,7 @@ pub enum ViewMessage {
     ScrollTo(i64),
     ScrollColTo(i64),
     Select(usize),
-    /// Double-click on a pattern row.
+    /// Double-click on a row: zooms into a pattern, or wraps/unwraps a log line.
     Activate(usize),
 }
 
@@ -73,8 +74,16 @@ pub struct LogView {
     pub current_match_line: i64,
     tags: Vec<TagDef>,
 
+    /// Wrap every line to the view's width.
+    wrap_all: bool,
+    /// Real line numbers wrapped one at a time (Enter or double-click).
+    wrapped: HashSet<i64>,
+
     /// Text area (canvas minus scrollbars), as of the last draw.
     viewport: Cell<Size>,
+    /// The display row drawn on each screen row, as of the last draw. Wrapped lines span several
+    /// screen rows, so mouse hit-testing needs this instead of `top + y / ROW_H`.
+    row_lines: RefCell<Vec<usize>>,
 }
 
 impl LogView {
@@ -92,7 +101,10 @@ impl LogView {
             active_filter: None,
             current_match_line: -1,
             tags: Vec::new(),
+            wrap_all: false,
+            wrapped: HashSet::new(),
             viewport: Cell::new(Size::ZERO),
+            row_lines: RefCell::new(Vec::new()),
         }
     }
 
@@ -148,11 +160,50 @@ impl LogView {
         }
     }
 
+    pub fn wrap_all(&self) -> bool {
+        self.wrap_all
+    }
+
+    pub fn toggle_wrap_all(&mut self) {
+        self.wrap_all = !self.wrap_all;
+        self.wrapped.clear();
+        self.scroll_cols_to(self.left_col as i64);
+        self.scroll_to(self.top as i64);
+    }
+
+    /// Wraps or unwraps one line, by display row. Does nothing while every line is wrapped.
+    pub fn toggle_wrap_line(&mut self, display: usize) {
+        if self.mode != LogViewMode::Lines || self.wrap_all || display >= self.display_count() {
+            return;
+        }
+        let line = self.actual_line(display);
+        if !self.wrapped.remove(&line) {
+            self.wrapped.insert(line);
+        }
+        self.scroll_to(self.top as i64);
+    }
+
+    fn is_wrapped(&self, line: i64) -> bool {
+        self.mode == LogViewMode::Lines && (self.wrap_all || self.wrapped.contains(&line))
+    }
+
+    /// Screen rows a display row takes up.
+    fn line_rows(&self, display: usize) -> usize {
+        let line = self.actual_line(display);
+        if !self.is_wrapped(line) {
+            return 1;
+        }
+        let Some(file) = &self.file else { return 1 };
+        let chars = file.get_line(line as usize, MAX_LINE_BYTES).chars().count();
+        chars.div_ceil(self.visible_cols()).max(1)
+    }
+
     pub fn set_file(&mut self, file: Option<Arc<LogFile>>) {
         self.file = file;
         self.top = 0;
         self.left_col = 0;
         self.selected = -1;
+        self.wrapped.clear();
         self.matches = None;
         self.current_match_line = -1;
     }
@@ -209,11 +260,28 @@ impl LogView {
     // --------------------------------------------------------------- scrolling
 
     fn max_top(&self) -> usize {
-        self.display_count().saturating_sub(self.visible_rows())
+        let count = self.display_count();
+        let rows = self.visible_rows();
+        let wrapping = self.wrap_all || !self.wrapped.is_empty();
+        if self.mode == LogViewMode::Templates || !wrapping {
+            return count.saturating_sub(rows);
+        }
+        // Walk back from the end until the last lines fill a screen.
+        let mut top = count;
+        let mut used = 0;
+        while top > 0 {
+            let height = self.line_rows(top - 1);
+            if used + height > rows {
+                break;
+            }
+            used += height;
+            top -= 1;
+        }
+        top.min(count.saturating_sub(1))
     }
 
     fn max_left(&self) -> usize {
-        if self.mode == LogViewMode::Templates {
+        if self.mode == LogViewMode::Templates || self.wrap_all {
             return 0;
         }
         let longest = self.file.as_ref().map_or(0, |f| f.max_line_bytes().max(0) as usize);
@@ -343,6 +411,9 @@ impl LogView {
             Key::Named(Named::Home) => self.left_col = 0,
             Key::Named(Named::End) if ctrl => self.scroll_to(self.display_count() as i64),
             Key::Named(Named::End) => self.scroll_cols_to(i64::MAX),
+            Key::Named(Named::Enter) if self.selected >= 0 => {
+                self.toggle_wrap_line(self.selected as usize)
+            }
             Key::Named(Named::Escape) => outcome.escape_pressed = true,
             Key::Character(c) if ctrl && c.as_str().eq_ignore_ascii_case("c") => {
                 if self.selected >= 0 {
@@ -373,35 +444,46 @@ impl LogView {
 
         let count = self.display_count();
         let cols = self.visible_cols() + 2;
+        let wrap_cols = self.visible_cols();
+        let screen_rows = self.visible_rows() + 1; // one extra so a partial last row is drawn
         let highlight = self.matcher.as_ref().is_some_and(|m| !m.is_empty() && m.is_valid());
         let mut ranges: Vec<i32> = Vec::with_capacity(64);
         let mut tag_ranges: Vec<i32> = Vec::with_capacity(32);
-        let mut ink: Vec<Color> = Vec::with_capacity(cols);
+        let mut ink: Vec<Color> = Vec::new();
+        let mut row_lines = self.row_lines.borrow_mut();
+        row_lines.clear();
 
-        // One extra row so a partially visible last line is still drawn.
-        for r in 0..=self.visible_rows() {
-            let display = self.top + r;
-            if display >= count {
-                break;
-            }
-
+        let mut display = self.top;
+        while display < count && row_lines.len() < screen_rows {
             let line = self.actual_line(display);
             let full = file.get_line(line as usize, MAX_LINE_BYTES);
-            let y = r as f32 * ROW_H;
+            let chars: Vec<char> = full.chars().collect();
+            let y = row_lines.len() as f32 * ROW_H;
             let is_current = line == self.current_match_line;
             let is_selected = display as i64 == self.selected;
             let level = level_span(&full);
 
+            // A wrapped line is cut into `wrap_cols` pieces from column 0; an unwrapped one is a
+            // single piece starting at the horizontal scroll position.
+            let (first_col, piece_len, pieces) = if self.is_wrapped(line) {
+                (0, wrap_cols, chars.len().div_ceil(wrap_cols).max(1))
+            } else {
+                (self.left_col, cols, 1)
+            };
+            let pieces = pieces.min(screen_rows - row_lines.len());
+            let height = pieces as f32 * ROW_H;
+            row_lines.extend(std::iter::repeat_n(display, pieces));
+
             if is_selected {
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
-                    Size::new(size.width - gutter_w, ROW_H),
+                    Size::new(size.width - gutter_w, height),
                     theme::SEL_BG,
                 );
             } else if hover_row == Some(display) {
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
-                    Size::new(size.width - gutter_w, ROW_H),
+                    Size::new(size.width - gutter_w, height),
                     theme::HOVER_ROW,
                 );
             }
@@ -409,10 +491,10 @@ impl LogView {
             // A level-coloured tick at the gutter's edge makes errors findable while scrolling.
             if let Some((_, _, color)) = level.filter(|l| l.2 == theme::ERROR || l.2 == theme::WARN)
             {
-                frame.fill_rectangle(Point::new(0.0, y + 2.0), Size::new(3.0, ROW_H - 4.0), color);
+                frame.fill_rectangle(Point::new(0.0, y + 2.0), Size::new(3.0, height - 4.0), color);
             }
             if is_selected {
-                frame.fill_rectangle(Point::new(gutter_w, y), Size::new(2.0, ROW_H), theme::ACCENT);
+                frame.fill_rectangle(Point::new(gutter_w, y), Size::new(2.0, height), theme::ACCENT);
             }
 
             frame.fill_text(Text {
@@ -434,37 +516,12 @@ impl LogView {
                 }
             }
 
-            // 0) tag highlight backgrounds, behind the ad-hoc search highlight
-            for tag in &self.tags {
-                if !tag.highlight_on {
-                    continue;
-                }
-                let Some(matcher) = &tag.matcher else { continue };
-                if matcher.is_empty() || !matcher.is_valid() {
-                    continue;
-                }
-                tag_ranges.clear();
-                matcher.append_ranges(&full, &mut tag_ranges);
-                let [r8, g8, b8] = tag.color();
-                let brush = Color::from_rgba8(r8, g8, b8, 0.30);
-                for pair in tag_ranges.chunks_exact(2) {
-                    self.fill_columns(frame, pair, cols, y, brush);
-                }
-            }
-
-            // 1) match backgrounds
-            let match_bg = if is_current { theme::CUR_BG } else { theme::MATCH_BG };
-            for pair in ranges.chunks_exact(2) {
-                self.fill_columns(frame, pair, cols, y, match_bg);
-            }
-
-            // 2) the visible slice, split into runs of one colour each so nothing is drawn twice
-            let visible: Vec<char> = full.chars().skip(self.left_col).take(cols).collect();
+            // Colour every character once: timestamp, level word, matches, plain text.
             ink.clear();
-            ink.resize(visible.len(), theme::TEXT);
+            ink.resize(chars.len(), theme::TEXT);
             let mut paint = |start: i32, len: i32, color: Color| {
-                let a = (start - self.left_col as i32).max(0) as usize;
-                let b = ((start + len - self.left_col as i32).max(0) as usize).min(ink.len());
+                let a = start.max(0) as usize;
+                let b = ((start + len).max(0) as usize).min(ink.len());
                 if a < b {
                     ink[a..b].fill(color);
                 }
@@ -479,34 +536,74 @@ impl LogView {
             for pair in ranges.chunks_exact(2) {
                 paint(pair[0], pair[1], match_fg);
             }
+            let match_bg = if is_current { theme::CUR_BG } else { theme::MATCH_BG };
 
-            let mut run_start = 0;
-            for i in 1..=visible.len() {
-                if i == visible.len() || ink[i] != ink[run_start] {
-                    frame.fill_text(Text {
-                        content: visible[run_start..i].iter().collect(),
-                        position: Point::new(
-                            text_x + run_start as f32 * CHAR_W,
-                            y + ROW_H / 2.0,
-                        ),
-                        color: ink[run_start],
-                        size: Pixels(theme::MONO_SIZE),
-                        font: theme::MONO,
-                        align_y: Vertical::Center,
-                        shaping: Shaping::Basic,
-                        ..Text::default()
-                    });
-                    run_start = i;
+            for piece in 0..pieces {
+                let y = y + piece as f32 * ROW_H;
+                let start = first_col + piece * piece_len;
+
+                // 0) tag highlight backgrounds, behind the ad-hoc search highlight
+                for tag in &self.tags {
+                    if !tag.highlight_on {
+                        continue;
+                    }
+                    let Some(matcher) = &tag.matcher else { continue };
+                    if matcher.is_empty() || !matcher.is_valid() {
+                        continue;
+                    }
+                    tag_ranges.clear();
+                    matcher.append_ranges(&full, &mut tag_ranges);
+                    let [r8, g8, b8] = tag.color();
+                    let brush = Color::from_rgba8(r8, g8, b8, 0.30);
+                    for pair in tag_ranges.chunks_exact(2) {
+                        self.fill_columns(frame, pair, start, piece_len, y, brush);
+                    }
+                }
+
+                // 1) match backgrounds
+                for pair in ranges.chunks_exact(2) {
+                    self.fill_columns(frame, pair, start, piece_len, y, match_bg);
+                }
+
+                // 2) the text, split into runs of one colour each so nothing is drawn twice
+                let end = (start + piece_len).min(chars.len());
+                let mut run_start = start;
+                for i in start + 1..=end {
+                    if i == end || ink[i] != ink[run_start] {
+                        frame.fill_text(Text {
+                            content: chars[run_start..i].iter().collect(),
+                            position: Point::new(
+                                text_x + (run_start - start) as f32 * CHAR_W,
+                                y + ROW_H / 2.0,
+                            ),
+                            color: ink[run_start],
+                            size: Pixels(theme::MONO_SIZE),
+                            font: theme::MONO,
+                            align_y: Vertical::Center,
+                            shaping: Shaping::Basic,
+                            ..Text::default()
+                        });
+                        run_start = i;
+                    }
                 }
             }
+            display += 1;
         }
     }
 
     /// Fills the background behind character range `pair` = `[start, len]`, clipped to the
-    /// visible columns.
-    fn fill_columns(&self, frame: &mut Frame, pair: &[i32], cols: usize, y: f32, color: Color) {
-        let c0 = (pair[0] - self.left_col as i32).max(0);
-        let c1 = (pair[0] + pair[1] - self.left_col as i32).min(cols as i32);
+    /// `len` columns starting at column `first`.
+    fn fill_columns(
+        &self,
+        frame: &mut Frame,
+        pair: &[i32],
+        first: usize,
+        len: usize,
+        y: f32,
+        color: Color,
+    ) {
+        let c0 = (pair[0] - first as i32).max(0);
+        let c1 = (pair[0] + pair[1] - first as i32).min(len as i32);
         if c1 <= c0 {
             return;
         }
@@ -646,7 +743,8 @@ impl LogView {
             }
         }
 
-        if let Some(thumb) = v_thumb(count, self.visible_rows(), self.top, v_track) {
+        if let Some(thumb) = v_thumb(count, self.visible_rows(), self.max_top(), self.top, v_track)
+        {
             let hot = state.drag.is_some_and(|d| d.vertical) || state.hot == Some(true);
             fill_thumb(frame, thumb, hot, true);
         }
@@ -668,8 +766,13 @@ impl LogView {
         }
     }
 
+    /// The display row under `point`; `usize::MAX` below the last line.
     fn row_at(&self, point: Point) -> usize {
-        self.top + (point.y / ROW_H).max(0.0) as usize
+        let screen_row = (point.y / ROW_H).max(0.0) as usize;
+        if self.mode == LogViewMode::Templates {
+            return self.top + screen_row;
+        }
+        self.row_lines.borrow().get(screen_row).copied().unwrap_or(usize::MAX)
     }
 }
 
@@ -687,8 +790,13 @@ fn fill_thumb(frame: &mut Frame, thumb: Rectangle, hot: bool, vertical: bool) {
 }
 
 /// Thumb geometry for a vertical track, or `None` when everything fits.
-fn v_thumb(count: usize, rows: usize, top: usize, track: Rectangle) -> Option<Rectangle> {
-    let max_top = count.saturating_sub(rows);
+fn v_thumb(
+    count: usize,
+    rows: usize,
+    max_top: usize,
+    top: usize,
+    track: Rectangle,
+) -> Option<Rectangle> {
     if max_top == 0 || track.height <= 0.0 {
         return None;
     }
@@ -788,13 +896,14 @@ impl canvas::Program<ViewMessage> for LogView {
         );
         let count = self.display_count();
         let rows = self.visible_rows();
+        let max_top = self.max_top();
         let content = Rectangle::new(Point::ORIGIN, size);
 
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = cursor.position_in(bounds)?;
                 if v_track.contains(p) {
-                    let thumb = v_thumb(count, rows, self.top, v_track)?;
+                    let thumb = v_thumb(count, rows, max_top, self.top, v_track)?;
                     if thumb.contains(p) {
                         state.drag = Some(Drag { vertical: true, grab: p.y - thumb.y });
                         return Some(Action::request_redraw().and_capture());
@@ -826,7 +935,7 @@ impl canvas::Program<ViewMessage> for LogView {
                     .last_click
                     .is_some_and(|(at, last_row)| last_row == row && now - at < DOUBLE_CLICK);
                 state.last_click = if double { None } else { Some((now, row)) };
-                let message = if self.mode == LogViewMode::Templates && double {
+                let message = if double {
                     ViewMessage::Activate(row)
                 } else {
                     ViewMessage::Select(row)
@@ -841,10 +950,10 @@ impl canvas::Program<ViewMessage> for LogView {
                 if let Some(drag) = state.drag {
                     let p = cursor.position_from(bounds.position())?;
                     return if drag.vertical {
-                        let thumb = v_thumb(count, rows, self.top, v_track)?;
+                        let thumb = v_thumb(count, rows, max_top, self.top, v_track)?;
                         let span = v_track.height - thumb.height;
                         let at = ((p.y - drag.grab) / span).clamp(0.0, 1.0);
-                        let top = (at * count.saturating_sub(rows) as f32).round() as i64;
+                        let top = (at * max_top as f32).round() as i64;
                         Some(Action::publish(ViewMessage::ScrollTo(top)))
                     } else {
                         let max_left = self.max_left();

@@ -67,6 +67,7 @@ pub enum Message {
     ToggleFilter,
     ToggleExclude,
     TogglePatterns,
+    ToggleWrap,
     OpenDialog,
     NewTag,
     Chip(Uuid, ChipAction),
@@ -958,6 +959,7 @@ impl App {
                 self.recompute_active_filter();
             }
             Message::TogglePatterns => self.toggle_semantic_zoom(),
+            Message::ToggleWrap => self.view.toggle_wrap_all(),
             Message::OpenDialog => self.open_dialog(),
             Message::NewTag => {
                 self.popup = Some(TagEditPopup::new_tag(
@@ -1000,7 +1002,11 @@ impl App {
                 ViewMessage::Select(row) => self.view.select(row),
                 ViewMessage::Activate(row) => {
                     self.view.select(row);
-                    self.zoom_into_selected_template();
+                    if self.view.mode() == LogViewMode::Templates {
+                        self.zoom_into_selected_template();
+                    } else {
+                        self.view.toggle_wrap_line(row);
+                    }
                 }
             },
             Message::KeyPressed {
@@ -1076,6 +1082,11 @@ impl App {
                     _ => {}
                 }
             }
+        }
+
+        if modifiers.alt() && matches!(&key, Key::Character(c) if c.eq_ignore_ascii_case("z")) {
+            self.view.toggle_wrap_all();
+            return Task::none();
         }
 
         match key {
@@ -1289,8 +1300,23 @@ impl App {
             tooltip::Position::Bottom,
         );
 
+        let wrap = with_tip(
+            button(
+                text("Wrap")
+                    .size(theme::UI_SIZE)
+                    .height(Length::Fill)
+                    .align_y(Alignment::Center),
+            )
+            .height(34)
+            .padding([0, 12])
+            .style(theme::toggle(self.view.wrap_all()))
+            .on_press_maybe(has_file.then_some(Message::ToggleWrap)),
+            "Wrap long lines  (Alt+Z)\nEnter or double-click wraps just the selected line",
+            tooltip::Position::Bottom,
+        );
+
         container(
-            row![open, search, options, patterns]
+            row![open, search, options, wrap, patterns]
                 .spacing(8)
                 .align_y(Alignment::Center),
         )
