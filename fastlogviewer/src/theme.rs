@@ -45,60 +45,41 @@ pub fn ui_font(size: f32) -> FontId {
     FontId::new(pt(size), FontFamily::Proportional)
 }
 
-/// Installs the same font preferences the C# `Theme` had, reading the TrueType files directly —
-/// egui has no access to the system font list, so the candidates are tried by filename and the
-/// built-in faces stay as the fallback.
+/// Installs JetBrains Mono and Inter ahead of egui's built-in faces, which stay as the fallback
+/// for glyphs these two don't cover. Both are embedded so the look doesn't depend on what the
+/// machine has installed.
 pub fn install_fonts(ctx: &eframe::egui::Context) {
-    const MONO_CANDIDATES: [&str; 5] = [
-        "JetBrainsMono-Regular.ttf",
-        "CascadiaMono.ttf",
-        "CascadiaCode.ttf",
-        "consola.ttf",
-        "cour.ttf",
-    ];
-    const UI_CANDIDATES: [&str; 1] = ["segoeui.ttf"];
-
     let mut fonts = eframe::egui::FontDefinitions::default();
-    let mut installed = false;
-
-    if let Some((name, bytes)) = first_installed(&MONO_CANDIDATES) {
-        fonts
-            .font_data
-            .insert(name.clone(), Arc::new(eframe::egui::FontData::from_owned(bytes)));
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .insert(0, name);
-        installed = true;
-    }
-
-    if let Some((name, bytes)) = first_installed(&UI_CANDIDATES) {
-        fonts
-            .font_data
-            .insert(name.clone(), Arc::new(eframe::egui::FontData::from_owned(bytes)));
-        fonts
-            .families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .insert(0, name);
-        installed = true;
-    }
-
-    if installed {
-        ctx.set_fonts(fonts);
-    }
+    add_font(
+        &mut fonts,
+        FontFamily::Monospace,
+        "JetBrainsMono-Regular",
+        include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    );
+    add_font(
+        &mut fonts,
+        FontFamily::Proportional,
+        "Inter-Regular",
+        include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    );
+    ctx.set_fonts(fonts);
 }
 
-fn first_installed(candidates: &[&str]) -> Option<(String, Vec<u8>)> {
-    let dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:/Windows".to_string());
-    for name in candidates {
-        let path = std::path::Path::new(&dir).join("Fonts").join(name);
-        if let Ok(bytes) = std::fs::read(&path) {
-            return Some((name.to_string(), bytes));
-        }
-    }
-    None
+fn add_font(
+    fonts: &mut eframe::egui::FontDefinitions,
+    family: FontFamily,
+    name: &str,
+    bytes: &'static [u8],
+) {
+    fonts.font_data.insert(
+        name.to_string(),
+        Arc::new(eframe::egui::FontData::from_static(bytes)),
+    );
+    fonts
+        .families
+        .entry(family)
+        .or_default()
+        .insert(0, name.to_string());
 }
 
 pub fn fill_round(painter: &Painter, color: Color32, rect: Rect, radius: f32) {
