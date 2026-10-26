@@ -1,38 +1,64 @@
-//! The log surface: gutter, rows, highlights and the two thin scrollbars.
+//! The log surface: gutter, rows, highlights and the two thin scrollbars, drawn on one canvas.
 //!
-//! Only the visible rows are ever decoded or drawn — roughly 60 `Painter::text` calls a frame — so
-//! scrolling a multi-GB file costs the same as scrolling an empty one.
+//! Only the visible rows are ever decoded or drawn, so scrolling a multi-GB file costs the same as
+//! scrolling an empty one.
 //!
-//! The C# control raised a `SelectionChanged` event so the form could refresh its status line.
-//! egui recomputes the whole status line every frame anyway, so only the two events that actually
-//! *change behaviour* survive as a return value.
+//! iced draws through `&self`, so the canvas cannot move the view itself. Mouse input becomes a
+//! [`ViewMessage`] the app applies with `&mut`; the only thing written back during a draw is the
+//! viewport size, which the keyboard paging in `update` needs and only layout knows.
 
+use std::cell::Cell;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use eframe::egui::{pos2, vec2, Align2, Color32, Context, FontId, Id, Key, Rect, Sense, Ui};
 use fastlogviewer_core::{
     FilterIndex, LogFile, LogTemplate, LogViewMode, MatchIndex, Matcher, TagDef, MAX_LINE_BYTES,
 };
+use iced::alignment::Vertical;
+use iced::keyboard::{self, key::Named, Key};
+use iced::mouse;
+use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Text};
+use iced::widget::text::{Alignment, Shaping};
+use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
+use crate::format::thousands;
 use crate::theme;
-use crate::widgets::{thousands, ThinScrollBar};
 
+pub const ROW_H: f32 = 20.0;
+/// JetBrains Mono advances every glyph 600/1000 em. Highlight rectangles are placed at
+/// `column * CHAR_W`, so this has to be the font's real advance, not a measured approximation.
+pub const CHAR_W: f32 = theme::MONO_SIZE * 0.6;
+const SCROLLBAR: f32 = 12.0;
+const GUTTER_PAD: f32 = 14.0;
+const TEXT_GAP: f32 = 12.0;
+const MIN_THUMB: f32 = 32.0;
+/// Rows per wheel notch.
+const WHEEL_ROWS: f32 = 3.0;
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Mouse input from the canvas, applied by the app.
+#[derive(Debug, Clone)]
+pub enum ViewMessage {
+    ScrollRows(i64),
+    ScrollCols(i64),
+    ScrollTo(i64),
+    ScrollColTo(i64),
+    Select(usize),
+    /// Double-click on a pattern row.
+    Activate(usize),
+}
+
+/// What a key press did that the app has to act on.
 #[derive(Default)]
-pub struct ViewEvents {
+pub struct KeyOutcome {
     pub template_activated: bool,
     pub escape_pressed: bool,
+    pub copy: Option<String>,
 }
 
 pub struct LogView {
-    vs: ThinScrollBar,
-    hs: ThinScrollBar,
-
     top: usize,
     left_col: usize,
-    row_h: f32,
-    text_h: f32,
-    char_w: f32,
-    gutter_w: f32,
     /// -1 when nothing is selected, which is "before the first row" for keyboard navigation.
     selected: i64,
 
@@ -47,25 +73,15 @@ pub struct LogView {
     pub current_match_line: i64,
     tags: Vec<TagDef>,
 
-    ranges: Vec<i32>,
-    tag_ranges: Vec<i32>,
-
-    view_w: f32,
-    view_h: f32,
-    font: FontId,
+    /// Text area (canvas minus scrollbars), as of the last draw.
+    viewport: Cell<Size>,
 }
 
 impl LogView {
     pub fn new() -> Self {
         LogView {
-            vs: ThinScrollBar::new(true),
-            hs: ThinScrollBar::new(false),
             top: 0,
             left_col: 0,
-            row_h: 16.0,
-            text_h: 13.0,
-            char_w: 7.0,
-            gutter_w: 0.0,
             selected: -1,
             mode: LogViewMode::Lines,
             templates: Vec::new(),
@@ -76,11 +92,7 @@ impl LogView {
             active_filter: None,
             current_match_line: -1,
             tags: Vec::new(),
-            ranges: Vec::with_capacity(64),
-            tag_ranges: Vec::with_capacity(32),
-            view_w: 0.0,
-            view_h: 0.0,
-            font: theme::mono(10.0),
+            viewport: Cell::new(Size::ZERO),
         }
     }
 
@@ -94,12 +106,12 @@ impl LogView {
         self.active_filter.is_some()
     }
 
-    fn filtering(&self) -> bool {
-        self.active_filter.is_some()
+    pub fn visible_rows(&self) -> usize {
+        ((self.viewport.get().height / ROW_H) as usize).max(1)
     }
 
-    pub fn visible_rows(&self) -> usize {
-        ((self.view_h / self.row_h) as usize).max(1)
+    fn visible_cols(&self) -> usize {
+        (((self.viewport.get().width - self.text_x()) / CHAR_W) as usize).max(1)
     }
 
     pub fn display_count(&self) -> usize {
@@ -143,7 +155,6 @@ impl LogView {
         self.selected = -1;
         self.matches = None;
         self.current_match_line = -1;
-        self.sync_scroll_bars();
     }
 
     pub fn set_matches(&mut self, matcher: Option<Arc<Matcher>>, matches: Option<Arc<MatchIndex>>) {
@@ -153,8 +164,6 @@ impl LogView {
         self.current_match_line = -1;
         if keep >= 0 {
             self.go_to_actual(keep);
-        } else {
-            self.sync_scroll_bars();
         }
     }
 
@@ -167,7 +176,6 @@ impl LogView {
         self.active_filter = filter;
         self.top = 0;
         self.selected = -1;
-        self.sync_scroll_bars();
         if keep >= 0 {
             self.go_to_actual(keep);
         }
@@ -180,12 +188,13 @@ impl LogView {
         if self.mode != LogViewMode::Templates {
             self.mode = LogViewMode::Templates;
             self.top = 0;
+            self.left_col = 0;
             self.selected = -1;
         }
         if self.selected >= self.templates.len() as i64 {
             self.selected = self.templates.len() as i64 - 1;
         }
-        self.sync_scroll_bars();
+        self.scroll_to(self.top as i64);
     }
 
     pub fn show_lines(&mut self) {
@@ -195,19 +204,36 @@ impl LogView {
         self.mode = LogViewMode::Lines;
         self.top = 0;
         self.selected = -1;
-        self.sync_scroll_bars();
     }
 
     // --------------------------------------------------------------- scrolling
+
+    fn max_top(&self) -> usize {
+        self.display_count().saturating_sub(self.visible_rows())
+    }
+
+    fn max_left(&self) -> usize {
+        if self.mode == LogViewMode::Templates {
+            return 0;
+        }
+        let longest = self.file.as_ref().map_or(0, |f| f.max_line_bytes().max(0) as usize);
+        (longest + 1).saturating_sub(self.visible_cols())
+    }
 
     pub fn scroll_by(&mut self, delta: i64) {
         self.scroll_to(self.top as i64 + delta);
     }
 
     pub fn scroll_to(&mut self, display: i64) {
-        let max = self.display_count().saturating_sub(self.visible_rows()) as i64;
-        self.top = display.clamp(0, max.max(0)) as usize;
-        self.vs.set_value(self.top as i32);
+        self.top = display.clamp(0, self.max_top() as i64) as usize;
+    }
+
+    pub fn scroll_cols_by(&mut self, delta: i64) {
+        self.scroll_cols_to(self.left_col as i64 + delta);
+    }
+
+    pub fn scroll_cols_to(&mut self, col: i64) {
+        self.left_col = col.clamp(0, self.max_left() as i64) as usize;
     }
 
     pub fn go_to_display(&mut self, display: i64) {
@@ -241,6 +267,12 @@ impl LogView {
         self.go_to_display(display);
     }
 
+    pub fn select(&mut self, display: usize) {
+        if display < self.display_count() {
+            self.selected = display as i64;
+        }
+    }
+
     fn move_template_selection(&mut self, delta: i64) {
         if self.templates.is_empty() {
             return;
@@ -258,285 +290,96 @@ impl LogView {
         }
     }
 
-    fn text_x_offset(&self) -> f32 {
-        self.gutter_w + 10.0
-    }
-
-    pub fn sync_scroll_bars(&mut self) {
+    fn gutter_w(&self) -> f32 {
         if self.mode == LogViewMode::Templates {
-            self.gutter_w = 12.0 * self.char_w; // room for a grouped count like "1,204,882"
-            self.vs.set_large_change(self.visible_rows() as i32);
-            self.vs.set_small_change(1);
-            self.vs.set_maximum(self.templates.len() as i32 - 1);
-            let max_top = self.templates.len().saturating_sub(self.visible_rows());
-            if self.top > max_top {
-                self.top = max_top;
-            }
-            self.vs.set_value(self.top as i32);
-            self.hs.set_maximum(0);
-            self.hs.set_value(0);
-            self.left_col = 0;
-            return;
+            return 11.0 * CHAR_W + 2.0 * GUTTER_PAD; // room for a grouped count like "1,204,882"
         }
-
-        let lines = self.display_count();
-        let rows = self.visible_rows();
-
-        let mut max_line_no = self.file.as_ref().map_or(0, |f| f.line_count());
-        let mut digits = 1;
-        while max_line_no >= 10 {
-            max_line_no /= 10;
-            digits += 1;
-        }
-        self.gutter_w = if self.file.is_none() {
-            0.0
-        } else {
-            digits as f32 * self.char_w + 20.0
-        };
-
-        self.vs.set_large_change(rows as i32);
-        self.vs.set_small_change(1);
-        self.vs.set_maximum(lines as i32 - 1);
-        let max_top = lines.saturating_sub(rows);
-        if self.top > max_top {
-            self.top = max_top;
-        }
-        self.vs.set_value(self.top as i32);
-
-        let cols = (((self.view_w - self.text_x_offset()) / self.char_w) as i32).max(1);
-        self.hs.set_large_change(cols);
-        self.hs.set_small_change(1);
-        self.hs
-            .set_maximum(self.file.as_ref().map_or(0, |f| f.max_line_bytes().max(0)));
-        if self.left_col as i32 > self.hs.maximum() {
-            self.left_col = self.hs.maximum() as usize;
-        }
-        self.hs.set_value(self.left_col as i32);
+        let Some(file) = &self.file else { return 0.0 };
+        let digits = file.line_count().max(1).ilog10() as f32 + 1.0;
+        digits.max(3.0) * CHAR_W + 2.0 * GUTTER_PAD
     }
 
-    /// Measures a ten-character run and divides, exactly as the C# `MeasureFont` did. A single
-    /// `glyph_width` call is *not* equivalent: egui rounds each glyph's advance during layout, so a
-    /// per-glyph width drifts away from a laid-out string and the highlight overlays — which are
-    /// positioned as `column * char_w` — slide off the text they are meant to cover.
-    fn measure_font(&mut self, ctx: &Context) {
-        let size = ctx.fonts(|f| {
-            f.layout_no_wrap(
-                "0000000000".to_string(),
-                self.font.clone(),
-                eframe::egui::Color32::WHITE,
-            )
-            .size()
-        });
-        self.char_w = (size.x / 10.0).max(1.0);
-        self.text_h = size.y.max(1.0);
-        self.row_h = self.text_h + 4.0; // a little leading; dense text is hard to scan
+    fn text_x(&self) -> f32 {
+        self.gutter_w() + TEXT_GAP
     }
 
     // ------------------------------------------------------------------ input
 
-    /// Keys the view owns. The caller forwards these only when no text editor holds focus, which is
-    /// how WinForms split `ProcessCmdKey` from `LogView.OnKeyDown`.
-    pub fn handle_keys(&mut self, ctx: &Context) -> ViewEvents {
-        let mut events = ViewEvents::default();
+    /// Keys the view owns. The app forwards these only when no text input consumed them.
+    pub fn handle_key(&mut self, key: &Key, modifiers: keyboard::Modifiers) -> KeyOutcome {
+        let mut outcome = KeyOutcome::default();
+        let rows = self.visible_rows() as i64;
 
         if self.mode == LogViewMode::Templates {
-            let rows = self.visible_rows() as i64;
-            ctx.input_mut(|i| {
-                if i.key_pressed(Key::ArrowUp) {
-                    self.move_template_selection(-1);
-                } else if i.key_pressed(Key::ArrowDown) {
-                    self.move_template_selection(1);
-                } else if i.key_pressed(Key::PageUp) {
-                    self.move_template_selection(-rows);
-                } else if i.key_pressed(Key::PageDown) {
-                    self.move_template_selection(rows);
-                } else if i.key_pressed(Key::Home) {
-                    self.move_template_selection(i64::MIN / 2);
-                } else if i.key_pressed(Key::End) {
-                    self.move_template_selection(i64::MAX / 2);
-                } else if i.key_pressed(Key::Enter) {
-                    events.template_activated = true;
-                } else if i.key_pressed(Key::Escape) {
-                    events.escape_pressed = true;
+            match key {
+                Key::Named(Named::ArrowUp) => self.move_template_selection(-1),
+                Key::Named(Named::ArrowDown) => self.move_template_selection(1),
+                Key::Named(Named::PageUp) => self.move_template_selection(-rows),
+                Key::Named(Named::PageDown) => self.move_template_selection(rows),
+                Key::Named(Named::Home) => self.move_template_selection(i64::MIN / 2),
+                Key::Named(Named::End) => self.move_template_selection(i64::MAX / 2),
+                Key::Named(Named::Enter) => {
+                    outcome.template_activated = self.selected_template().is_some()
                 }
-            });
-            if events.template_activated && self.selected_template().is_none() {
-                events.template_activated = false;
+                Key::Named(Named::Escape) => outcome.escape_pressed = true,
+                _ => {}
             }
-            return events;
+            return outcome;
         }
 
-        if self.file.is_none() {
-            return events;
-        }
+        let Some(file) = self.file.clone() else {
+            return outcome;
+        };
+        let ctrl = modifiers.command();
 
-        let rows = self.visible_rows() as i64;
-        let h_max = self.hs.max_value();
-        let mut copy: Option<i64> = None;
-
-        ctx.input_mut(|i| {
-            let ctrl = i.modifiers.command || i.modifiers.ctrl;
-            if i.key_pressed(Key::ArrowUp) {
-                self.scroll_by(-1);
-            } else if i.key_pressed(Key::ArrowDown) {
-                self.scroll_by(1);
-            } else if i.key_pressed(Key::PageUp) {
-                self.scroll_by(-rows);
-            } else if i.key_pressed(Key::PageDown) {
-                self.scroll_by(rows);
-            } else if i.key_pressed(Key::ArrowLeft) {
-                let v = (self.hs.value() - 8).max(0);
-                self.hs.set_value(v);
-                self.left_col = v as usize;
-            } else if i.key_pressed(Key::ArrowRight) {
-                let v = (self.hs.value() + 8).min(h_max);
-                self.hs.set_value(v);
-                self.left_col = v as usize;
-            } else if i.key_pressed(Key::Home) {
-                if ctrl {
-                    self.scroll_to(0);
-                } else {
-                    self.hs.set_value(0);
-                    self.left_col = 0;
-                }
-            } else if i.key_pressed(Key::End) {
-                if ctrl {
-                    self.scroll_to(self.display_count() as i64);
-                } else {
-                    self.hs.set_value(h_max);
-                    self.left_col = h_max as usize;
-                }
-            } else if ctrl && i.key_pressed(Key::C) {
+        match key {
+            Key::Named(Named::ArrowUp) => self.scroll_by(-1),
+            Key::Named(Named::ArrowDown) => self.scroll_by(1),
+            Key::Named(Named::PageUp) => self.scroll_by(-rows),
+            Key::Named(Named::PageDown) => self.scroll_by(rows),
+            Key::Named(Named::ArrowLeft) => self.scroll_cols_to(self.left_col as i64 - 8),
+            Key::Named(Named::ArrowRight) => self.scroll_cols_to(self.left_col as i64 + 8),
+            Key::Named(Named::Home) if ctrl => self.scroll_to(0),
+            Key::Named(Named::Home) => self.left_col = 0,
+            Key::Named(Named::End) if ctrl => self.scroll_to(self.display_count() as i64),
+            Key::Named(Named::End) => self.scroll_cols_to(i64::MAX),
+            Key::Named(Named::Escape) => outcome.escape_pressed = true,
+            Key::Character(c) if ctrl && c.as_str().eq_ignore_ascii_case("c") => {
                 if self.selected >= 0 {
-                    copy = Some(self.actual_line(self.selected as usize));
+                    let line = self.actual_line(self.selected as usize);
+                    let text = file.get_line(line as usize, 1 << 20);
+                    outcome.copy = Some(if text.is_empty() { " ".to_string() } else { text });
                 }
-            } else if i.key_pressed(Key::Escape) {
-                events.escape_pressed = true;
             }
-        });
-
-        if let (Some(line), Some(file)) = (copy, self.file.clone()) {
-            let text = file.get_line(line as usize, 1 << 20);
-            ctx.output_mut(|o| {
-                o.copied_text = if text.is_empty() {
-                    " ".to_string()
-                } else {
-                    text
-                }
-            });
+            _ => {}
         }
-
-        events
+        outcome
     }
 
     // ------------------------------------------------------------------ paint
 
-    pub fn ui(&mut self, ui: &mut Ui) -> ViewEvents {
-        let mut events = ViewEvents::default();
-        let rect = ui.available_rect_before_wrap();
-
-        self.measure_font(ui.ctx());
-        self.view_w = (rect.width() - theme::SCROLLBAR).max(0.0);
-        self.view_h = (rect.height() - theme::SCROLLBAR).max(0.0);
-        self.sync_scroll_bars();
-
-        let content = Rect::from_min_size(rect.min, vec2(self.view_w, self.view_h));
-        let response = ui.interact(content, Id::new("logview_surface"), Sense::click());
-
-        // --- mouse ---
-        if let Some(pointer) = response.interact_pointer_pos() {
-            if response.clicked() || response.double_clicked() {
-                let row = self.top as i64 + ((pointer.y - content.top()) / self.row_h) as i64;
-                if self.mode == LogViewMode::Templates {
-                    if row < self.templates.len() as i64 {
-                        self.selected = row;
-                        if response.double_clicked() {
-                            events.template_activated = true;
-                        }
-                    }
-                } else if self.file.is_some() && row < self.display_count() as i64 {
-                    self.selected = row;
-                }
-            }
-        }
-        if response.hovered() {
-            let scroll = ui.input(|i| i.raw_scroll_delta.y);
-            if scroll != 0.0 {
-                self.scroll_by(-(scroll / self.row_h).round() as i64);
-            }
-        }
-
-        // --- paint ---
-        let painter = ui.painter_at(content);
-        painter.rect_filled(content, 0.0, theme::BG);
-
-        if self.mode == LogViewMode::Templates {
-            self.paint_templates(&painter, content);
-        } else if self.file.is_none() {
-            self.paint_empty_state(&painter, content);
-        } else {
-            self.paint_lines(&painter, content);
-        }
-
-        // --- scrollbars ---
-        // Ticks only make sense unfiltered — filtered, every row is a match.
-        let marks = if self.filtering() {
-            None
-        } else {
-            self.matches.clone()
-        };
-        let mark_total = self.file.as_ref().map_or(0, |f| f.line_count() as i32);
-
-        let vs_rect = Rect::from_min_size(
-            pos2(rect.right() - theme::SCROLLBAR, rect.top()),
-            vec2(theme::SCROLLBAR, self.view_h),
-        );
-        let hs_rect = Rect::from_min_size(
-            pos2(rect.left(), rect.bottom() - theme::SCROLLBAR),
-            vec2(self.view_w, theme::SCROLLBAR),
-        );
-
-        if self
-            .vs
-            .ui(ui, vs_rect, Id::new("logview_vs"), marks.as_deref(), mark_total)
-        {
-            self.top = self.vs.value() as usize;
-        }
-        if self.hs.ui(ui, hs_rect, Id::new("logview_hs"), None, 0) {
-            self.left_col = self.hs.value() as usize;
-        }
-
-        events
-    }
-
-    fn paint_lines(&mut self, painter: &eframe::egui::Painter, content: Rect) {
+    fn paint_lines(&self, frame: &mut Frame, hover_row: Option<usize>) {
         let file = self.file.clone().expect("checked by the caller");
+        let size = self.viewport.get();
+        let gutter_w = self.gutter_w();
+        let text_x = self.text_x();
 
-        let text_x = content.left() + self.text_x_offset();
-        if self.gutter_w > 0.0 {
-            painter.rect_filled(
-                Rect::from_min_size(content.min, vec2(self.gutter_w, self.view_h)),
-                0.0,
-                theme::GUTTER,
-            );
-            theme::hairline(
-                painter,
-                theme::BORDER,
-                pos2(content.left() + self.gutter_w, content.top()),
-                pos2(content.left() + self.gutter_w, content.bottom()),
-            );
-        }
+        frame.fill_rectangle(Point::ORIGIN, Size::new(gutter_w, size.height), theme::GUTTER);
+        frame.fill_rectangle(
+            Point::new(gutter_w - 1.0, 0.0),
+            Size::new(1.0, size.height),
+            theme::BORDER,
+        );
 
         let count = self.display_count();
-        let rows = self.visible_rows();
-        let cols = (((self.view_w - self.text_x_offset()) / self.char_w) as usize).max(1) + 2;
-        let highlight = self
-            .matcher
-            .as_ref()
-            .is_some_and(|m| !m.is_empty() && m.is_valid());
-        let pad = (self.row_h - self.text_h) / 2.0;
+        let cols = self.visible_cols() + 2;
+        let highlight = self.matcher.as_ref().is_some_and(|m| !m.is_empty() && m.is_valid());
+        let mut ranges: Vec<i32> = Vec::with_capacity(64);
+        let mut tag_ranges: Vec<i32> = Vec::with_capacity(32);
+        let mut ink: Vec<Color> = Vec::with_capacity(cols);
 
-        for r in 0..rows {
+        // One extra row so a partially visible last line is still drawn.
+        for r in 0..=self.visible_rows() {
             let display = self.top + r;
             if display >= count {
                 break;
@@ -544,52 +387,54 @@ impl LogView {
 
             let line = self.actual_line(display);
             let full = file.get_line(line as usize, MAX_LINE_BYTES);
-            let y = content.top() + r as f32 * self.row_h;
-            let ty = y + pad;
+            let y = r as f32 * ROW_H;
             let is_current = line == self.current_match_line;
             let is_selected = display as i64 == self.selected;
+            let level = level_span(&full);
 
             if is_selected {
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        pos2(content.left() + self.gutter_w + 1.0, y),
-                        vec2(self.view_w - self.gutter_w - 1.0, self.row_h),
-                    ),
-                    0.0,
+                frame.fill_rectangle(
+                    Point::new(gutter_w, y),
+                    Size::new(size.width - gutter_w, ROW_H),
                     theme::SEL_BG,
                 );
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        pos2(content.left() + self.gutter_w + 1.0, y),
-                        vec2(2.0, self.row_h),
-                    ),
-                    0.0,
-                    theme::ACCENT,
+            } else if hover_row == Some(display) {
+                frame.fill_rectangle(
+                    Point::new(gutter_w, y),
+                    Size::new(size.width - gutter_w, ROW_H),
+                    theme::HOVER_ROW,
                 );
             }
 
-            if self.gutter_w > 0.0 {
-                painter.text(
-                    pos2(content.left() + self.gutter_w - 10.0, ty),
-                    Align2::RIGHT_TOP,
-                    (line + 1).to_string(),
-                    self.font.clone(),
-                    if is_selected {
-                        theme::TEXT_DIM
-                    } else {
-                        theme::TEXT_FAINT
-                    },
-                );
+            // A level-coloured tick at the gutter's edge makes errors findable while scrolling.
+            if let Some((_, _, color)) = level.filter(|l| l.2 == theme::ERROR || l.2 == theme::WARN)
+            {
+                frame.fill_rectangle(Point::new(0.0, y + 2.0), Size::new(3.0, ROW_H - 4.0), color);
+            }
+            if is_selected {
+                frame.fill_rectangle(Point::new(gutter_w, y), Size::new(2.0, ROW_H), theme::ACCENT);
             }
 
-            self.ranges.clear();
+            frame.fill_text(Text {
+                content: (line + 1).to_string(),
+                position: Point::new(gutter_w - GUTTER_PAD, y + ROW_H / 2.0),
+                color: if is_selected { theme::TEXT_DIM } else { theme::TEXT_FAINT },
+                size: Pixels(theme::MONO_SIZE),
+                font: theme::MONO,
+                align_x: Alignment::Right,
+                align_y: Vertical::Center,
+                shaping: Shaping::Basic,
+                ..Text::default()
+            });
+
+            ranges.clear();
             if highlight {
                 if let Some(m) = &self.matcher {
-                    m.append_ranges(&full, &mut self.ranges);
+                    m.append_ranges(&full, &mut ranges);
                 }
             }
 
-            // 0) tag highlight backgrounds (behind the ad-hoc search highlight)
+            // 0) tag highlight backgrounds, behind the ad-hoc search highlight
             for tag in &self.tags {
                 if !tag.highlight_on {
                     continue;
@@ -598,192 +443,505 @@ impl LogView {
                 if matcher.is_empty() || !matcher.is_valid() {
                     continue;
                 }
-
-                self.tag_ranges.clear();
-                matcher.append_ranges(&full, &mut self.tag_ranges);
-                if self.tag_ranges.is_empty() {
-                    continue;
-                }
-
+                tag_ranges.clear();
+                matcher.append_ranges(&full, &mut tag_ranges);
                 let [r8, g8, b8] = tag.color();
-                let brush = Color32::from_rgba_unmultiplied(r8, g8, b8, 70);
-                for pair in self.tag_ranges.chunks_exact(2) {
-                    let c0 = (pair[0] - self.left_col as i32).max(0);
-                    let c1 = (pair[0] + pair[1] - self.left_col as i32).min(cols as i32);
-                    if c1 <= c0 {
-                        continue;
-                    }
-                    painter.rect_filled(
-                        Rect::from_min_size(
-                            pos2(text_x + c0 as f32 * self.char_w, y),
-                            vec2((c1 - c0) as f32 * self.char_w, self.row_h),
-                        ),
-                        0.0,
-                        brush,
-                    );
+                let brush = Color::from_rgba8(r8, g8, b8, 0.30);
+                for pair in tag_ranges.chunks_exact(2) {
+                    self.fill_columns(frame, pair, cols, y, brush);
                 }
             }
 
             // 1) match backgrounds
-            for pair in self.ranges.chunks_exact(2) {
-                let c0 = (pair[0] - self.left_col as i32).max(0);
-                let c1 = (pair[0] + pair[1] - self.left_col as i32).min(cols as i32);
-                if c1 <= c0 {
-                    continue;
-                }
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        pos2(text_x + c0 as f32 * self.char_w, y),
-                        vec2((c1 - c0) as f32 * self.char_w, self.row_h),
-                    ),
-                    0.0,
-                    if is_current {
-                        theme::CUR_BG
-                    } else {
-                        theme::MATCH_BG
-                    },
-                );
+            let match_bg = if is_current { theme::CUR_BG } else { theme::MATCH_BG };
+            for pair in ranges.chunks_exact(2) {
+                self.fill_columns(frame, pair, cols, y, match_bg);
             }
 
-            // 2) the line itself
-            let visible = char_slice(&full, self.left_col, self.left_col + cols);
-            painter.text(
-                pos2(text_x, ty),
-                Align2::LEFT_TOP,
-                visible,
-                self.font.clone(),
-                theme::TEXT,
-            );
-
-            // 3) matched runs repainted in the highlight ink (exact x — the font is monospace)
-            let full_chars = full.chars().count() as i32;
-            for pair in self.ranges.chunks_exact(2) {
-                let a = pair[0].max(self.left_col as i32);
-                let b = (pair[0] + pair[1])
-                    .min(self.left_col as i32 + cols as i32)
-                    .min(full_chars);
-                if b <= a {
-                    continue;
+            // 2) the visible slice, split into runs of one colour each so nothing is drawn twice
+            let visible: Vec<char> = full.chars().skip(self.left_col).take(cols).collect();
+            ink.clear();
+            ink.resize(visible.len(), theme::TEXT);
+            let mut paint = |start: i32, len: i32, color: Color| {
+                let a = (start - self.left_col as i32).max(0) as usize;
+                let b = ((start + len - self.left_col as i32).max(0) as usize).min(ink.len());
+                if a < b {
+                    ink[a..b].fill(color);
                 }
-                painter.text(
-                    pos2(
-                        text_x + (a - self.left_col as i32) as f32 * self.char_w,
-                        ty,
-                    ),
-                    Align2::LEFT_TOP,
-                    char_slice(&full, a as usize, b as usize),
-                    self.font.clone(),
-                    if is_current {
-                        theme::CUR_FG
-                    } else {
-                        theme::MATCH_FG
-                    },
-                );
+            };
+            if let Some(len) = timestamp_len(&full) {
+                paint(0, len as i32, theme::TEXT_DIM);
+            }
+            if let Some((start, len, color)) = level {
+                paint(start as i32, len as i32, color);
+            }
+            let match_fg = if is_current { theme::CUR_FG } else { theme::MATCH_FG };
+            for pair in ranges.chunks_exact(2) {
+                paint(pair[0], pair[1], match_fg);
+            }
+
+            let mut run_start = 0;
+            for i in 1..=visible.len() {
+                if i == visible.len() || ink[i] != ink[run_start] {
+                    frame.fill_text(Text {
+                        content: visible[run_start..i].iter().collect(),
+                        position: Point::new(
+                            text_x + run_start as f32 * CHAR_W,
+                            y + ROW_H / 2.0,
+                        ),
+                        color: ink[run_start],
+                        size: Pixels(theme::MONO_SIZE),
+                        font: theme::MONO,
+                        align_y: Vertical::Center,
+                        shaping: Shaping::Basic,
+                        ..Text::default()
+                    });
+                    run_start = i;
+                }
             }
         }
     }
 
-    /// The zoomed-out view: one row per template, count in the gutter, rare patterns starred and
-    /// drawn in the accent colour.
-    fn paint_templates(&self, painter: &eframe::egui::Painter, content: Rect) {
+    /// Fills the background behind character range `pair` = `[start, len]`, clipped to the
+    /// visible columns.
+    fn fill_columns(&self, frame: &mut Frame, pair: &[i32], cols: usize, y: f32, color: Color) {
+        let c0 = (pair[0] - self.left_col as i32).max(0);
+        let c1 = (pair[0] + pair[1] - self.left_col as i32).min(cols as i32);
+        if c1 <= c0 {
+            return;
+        }
+        frame.fill(
+            &Path::rounded_rectangle(
+                Point::new(self.text_x() + c0 as f32 * CHAR_W - 1.0, y + 1.0),
+                Size::new((c1 - c0) as f32 * CHAR_W + 2.0, ROW_H - 2.0),
+                3.0.into(),
+            ),
+            color,
+        );
+    }
+
+    /// The zoomed-out view: one row per pattern, its line count in the gutter over a bar showing
+    /// its share of the busiest pattern; rare patterns starred and drawn in the accent colour.
+    fn paint_templates(&self, frame: &mut Frame, hover_row: Option<usize>) {
+        let size = self.viewport.get();
         if self.templates.is_empty() {
-            painter.text(
-                content.center(),
-                Align2::CENTER_CENTER,
-                "Clustering…",
-                self.font.clone(),
-                theme::TEXT_FAINT,
-            );
+            frame.fill_text(Text {
+                content: "Clustering…".to_string(),
+                position: Point::new(size.width / 2.0, size.height / 2.0),
+                color: theme::TEXT_FAINT,
+                size: Pixels(theme::UI_SIZE),
+                font: theme::UI,
+                align_x: Alignment::Center,
+                align_y: Vertical::Center,
+                ..Text::default()
+            });
             return;
         }
 
-        painter.rect_filled(
-            Rect::from_min_size(content.min, vec2(self.gutter_w, self.view_h)),
-            0.0,
-            theme::GUTTER,
-        );
-        theme::hairline(
-            painter,
+        let gutter_w = self.gutter_w();
+        let text_x = self.text_x();
+        let cols = self.visible_cols();
+        let busiest = self.templates.iter().map(|t| t.count()).max().unwrap_or(1).max(1);
+
+        frame.fill_rectangle(Point::ORIGIN, Size::new(gutter_w, size.height), theme::GUTTER);
+        frame.fill_rectangle(
+            Point::new(gutter_w - 1.0, 0.0),
+            Size::new(1.0, size.height),
             theme::BORDER,
-            pos2(content.left() + self.gutter_w, content.top()),
-            pos2(content.left() + self.gutter_w, content.bottom()),
         );
 
-        let rows = self.visible_rows();
-        let pad = (self.row_h - self.text_h) / 2.0;
-        let text_x = content.left() + self.text_x_offset();
-        let cols = (((self.view_w - self.text_x_offset()) / self.char_w) as usize).max(1);
-
-        for r in 0..rows {
+        for r in 0..=self.visible_rows() {
             let i = self.top + r;
             let Some(template) = self.templates.get(i) else {
                 break;
             };
 
-            let y = content.top() + r as f32 * self.row_h;
-            let ty = y + pad;
+            let y = r as f32 * ROW_H;
             let rare = template.count() <= self.rare_threshold;
             let is_selected = i as i64 == self.selected;
 
             if is_selected {
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        pos2(content.left() + self.gutter_w + 1.0, y),
-                        vec2(self.view_w - self.gutter_w - 1.0, self.row_h),
-                    ),
-                    0.0,
+                frame.fill_rectangle(
+                    Point::new(gutter_w, y),
+                    Size::new(size.width - gutter_w, ROW_H),
                     theme::SEL_BG,
                 );
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        pos2(content.left() + self.gutter_w + 1.0, y),
-                        vec2(2.0, self.row_h),
-                    ),
-                    0.0,
-                    theme::ACCENT,
+                frame.fill_rectangle(Point::new(gutter_w, y), Size::new(2.0, ROW_H), theme::ACCENT);
+            } else if hover_row == Some(i) {
+                frame.fill_rectangle(
+                    Point::new(gutter_w, y),
+                    Size::new(size.width - gutter_w, ROW_H),
+                    theme::HOVER_ROW,
                 );
             }
 
-            painter.text(
-                pos2(content.left() + self.gutter_w - 10.0, ty),
-                Align2::RIGHT_TOP,
-                thousands(template.count() as u64),
-                self.font.clone(),
-                if rare { theme::ACCENT } else { theme::TEXT_DIM },
+            let share = template.count() as f32 / busiest as f32;
+            let bar_w = ((gutter_w - 8.0) * share).max(2.0);
+            frame.fill(
+                &Path::rounded_rectangle(
+                    Point::new(gutter_w - 4.0 - bar_w, y + 3.0),
+                    Size::new(bar_w, ROW_H - 6.0),
+                    3.0.into(),
+                ),
+                theme::alpha(if rare { theme::ACCENT } else { theme::TEXT_DIM }, 0.12),
             );
 
+            frame.fill_text(Text {
+                content: thousands(template.count() as u64),
+                position: Point::new(gutter_w - GUTTER_PAD, y + ROW_H / 2.0),
+                color: if rare { theme::ACCENT } else { theme::TEXT_DIM },
+                size: Pixels(theme::MONO_SIZE),
+                font: theme::MONO,
+                align_x: Alignment::Right,
+                align_y: Vertical::Center,
+                shaping: Shaping::Basic,
+                ..Text::default()
+            });
+
             let rendered = template.render();
-            let text = if rare {
-                format!("★  {rendered}")
-            } else {
-                rendered
-            };
-            painter.text(
-                pos2(text_x, ty),
-                Align2::LEFT_TOP,
-                char_slice(&text, 0, cols),
-                self.font.clone(),
-                if rare { theme::ACCENT } else { theme::TEXT },
-            );
+            let text = if rare { format!("★ {rendered}") } else { rendered };
+            frame.fill_text(Text {
+                content: text.chars().take(cols).collect(),
+                position: Point::new(text_x, y + ROW_H / 2.0),
+                color: if rare { theme::ACCENT } else { theme::TEXT },
+                size: Pixels(theme::MONO_SIZE),
+                font: theme::MONO,
+                align_y: Vertical::Center,
+                ..Text::default()
+            });
         }
     }
 
-    fn paint_empty_state(&self, painter: &eframe::egui::Painter, content: Rect) {
-        painter.text(
-            content.center(),
-            Align2::CENTER_CENTER,
-            "Drop a log file here    ·    Ctrl+O to open",
-            self.font.clone(),
-            theme::TEXT_FAINT,
+    fn paint_scrollbars(&self, frame: &mut Frame, bounds: Size, state: &CanvasState) {
+        let size = self.viewport.get();
+        let count = self.display_count();
+
+        let v_track = Rectangle::new(Point::new(size.width, 0.0), Size::new(SCROLLBAR, size.height));
+        frame.fill_rectangle(v_track.position(), v_track.size(), theme::BG);
+        frame.fill_rectangle(
+            Point::new(size.width, 0.0),
+            Size::new(1.0, size.height),
+            theme::alpha(theme::BORDER, 0.6),
         );
+
+        // Ticks only make sense unfiltered — filtered, every row is a match.
+        if let (Some(marks), None, LogViewMode::Lines) =
+            (&self.matches, &self.active_filter, self.mode)
+        {
+            let total = self.file.as_ref().map_or(0, |f| f.line_count());
+            let n = marks.count();
+            if n > 0 && total > 0 {
+                let step = (n / 1200).max(1);
+                let h = (size.height - 2.0).max(1.0);
+                let mut i = 0;
+                while i < n {
+                    let y = marks.get(i) as f32 * h / total as f32;
+                    frame.fill_rectangle(
+                        Point::new(v_track.x + 3.0, y),
+                        Size::new(SCROLLBAR - 6.0, 2.0),
+                        theme::TICK,
+                    );
+                    i += step;
+                }
+            }
+        }
+
+        if let Some(thumb) = v_thumb(count, self.visible_rows(), self.top, v_track) {
+            let hot = state.drag.is_some_and(|d| d.vertical) || state.hot == Some(true);
+            fill_thumb(frame, thumb, hot, true);
+        }
+
+        let h_track = Rectangle::new(
+            Point::new(0.0, size.height),
+            Size::new(size.width, bounds.height - size.height),
+        );
+        frame.fill_rectangle(h_track.position(), h_track.size(), theme::BG);
+        let cols = self.visible_cols();
+        let h_track_text = Rectangle {
+            x: self.text_x(),
+            width: (h_track.width - self.text_x()).max(0.0),
+            ..h_track
+        };
+        if let Some(thumb) = h_thumb(self.max_left(), cols, self.left_col, h_track_text) {
+            let hot = state.drag.is_some_and(|d| !d.vertical) || state.hot == Some(false);
+            fill_thumb(frame, thumb, hot, false);
+        }
+    }
+
+    fn row_at(&self, point: Point) -> usize {
+        self.top + (point.y / ROW_H).max(0.0) as usize
     }
 }
 
-/// Characters `start..end` of `s`, clamped. Column arithmetic throughout the view is in characters,
-/// so this is the only correct way to slice a line that may hold multi-byte UTF-8.
-fn char_slice(s: &str, start: usize, end: usize) -> String {
-    if end <= start {
-        return String::new();
+fn fill_thumb(frame: &mut Frame, thumb: Rectangle, hot: bool, vertical: bool) {
+    let inset = if hot { 2.0 } else { 3.0 };
+    let rect = if vertical {
+        Rectangle { x: thumb.x + inset, width: thumb.width - inset * 2.0, ..thumb }
+    } else {
+        Rectangle { y: thumb.y + inset, height: thumb.height - inset * 2.0, ..thumb }
+    };
+    frame.fill(
+        &Path::rounded_rectangle(rect.position(), rect.size(), 999.0.into()),
+        if hot { theme::TEXT_DIM } else { theme::BORDER_STRONG },
+    );
+}
+
+/// Thumb geometry for a vertical track, or `None` when everything fits.
+fn v_thumb(count: usize, rows: usize, top: usize, track: Rectangle) -> Option<Rectangle> {
+    let max_top = count.saturating_sub(rows);
+    if max_top == 0 || track.height <= 0.0 {
+        return None;
     }
-    s.chars().skip(start).take(end - start).collect()
+    let len = (track.height * rows as f32 / count as f32).clamp(MIN_THUMB.min(track.height), track.height);
+    let pos = (track.height - len) * top as f32 / max_top as f32;
+    Some(Rectangle::new(Point::new(track.x, track.y + pos), Size::new(track.width, len)))
+}
+
+fn h_thumb(max_left: usize, cols: usize, left: usize, track: Rectangle) -> Option<Rectangle> {
+    if max_left == 0 || track.width <= 0.0 {
+        return None;
+    }
+    let total = max_left + cols;
+    let len = (track.width * cols as f32 / total as f32).clamp(MIN_THUMB.min(track.width), track.width);
+    let pos = (track.width - len) * left as f32 / max_left as f32;
+    Some(Rectangle::new(Point::new(track.x + pos, track.y), Size::new(len, track.height)))
+}
+
+/// Length in chars of a leading timestamp — a first token that starts with a digit and holds a
+/// `:` — so it can be drawn dimmer than the message after it.
+fn timestamp_len(line: &str) -> Option<usize> {
+    let token = line.split([' ', '\t']).next()?;
+    let looks_like_time = token.starts_with(|c: char| c.is_ascii_digit()) && token.contains(':');
+    looks_like_time.then(|| token.chars().count())
+}
+
+/// Finds a log level word (`ERROR`, `WARN`, …) near the start of a line: its char offset, char
+/// length and colour. Upper-case only, and only within the first 96 characters, so a message that
+/// merely *mentions* "info" further along is left alone.
+fn level_span(line: &str) -> Option<(usize, usize, Color)> {
+    let mut start: Option<usize> = None;
+    let mut word = String::new();
+    for (i, c) in line.chars().take(96).chain(std::iter::once(' ')).enumerate() {
+        if c.is_ascii_uppercase() {
+            if start.is_none() {
+                start = Some(i);
+                word.clear();
+            }
+            word.push(c);
+            continue;
+        }
+        if c.is_alphanumeric() {
+            start = None; // part of a longer mixed-case token
+            continue;
+        }
+        if let Some(s) = start.take() {
+            let color = match word.as_str() {
+                "ERROR" | "ERR" | "FATAL" | "CRITICAL" | "CRIT" => theme::ERROR,
+                "WARN" | "WARNING" => theme::WARN,
+                "INFO" => theme::INFO,
+                "DEBUG" | "DBG" | "TRACE" => theme::DEBUG,
+                _ => continue,
+            };
+            return Some((s, word.len(), color));
+        }
+    }
+    None
+}
+
+// ------------------------------------------------------------------- canvas
+
+#[derive(Clone, Copy)]
+pub struct Drag {
+    vertical: bool,
+    /// Pointer offset from the thumb's leading edge when the drag began.
+    grab: f32,
+}
+
+#[derive(Default)]
+pub struct CanvasState {
+    drag: Option<Drag>,
+    /// Which scrollbar the pointer is over: `Some(true)` vertical, `Some(false)` horizontal.
+    hot: Option<bool>,
+    hover_row: Option<usize>,
+    /// When and on which row the last click landed, to recognise a double-click.
+    last_click: Option<(Instant, usize)>,
+}
+
+impl canvas::Program<ViewMessage> for LogView {
+    type State = CanvasState;
+
+    fn update(
+        &self,
+        state: &mut CanvasState,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<Action<ViewMessage>> {
+        let size = Size::new(
+            (bounds.width - SCROLLBAR).max(0.0),
+            (bounds.height - SCROLLBAR).max(0.0),
+        );
+        let v_track = Rectangle::new(Point::new(size.width, 0.0), Size::new(SCROLLBAR, size.height));
+        let h_track = Rectangle::new(
+            Point::new(self.text_x(), size.height),
+            Size::new((size.width - self.text_x()).max(0.0), SCROLLBAR),
+        );
+        let count = self.display_count();
+        let rows = self.visible_rows();
+        let content = Rectangle::new(Point::ORIGIN, size);
+
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let p = cursor.position_in(bounds)?;
+                if v_track.contains(p) {
+                    let thumb = v_thumb(count, rows, self.top, v_track)?;
+                    if thumb.contains(p) {
+                        state.drag = Some(Drag { vertical: true, grab: p.y - thumb.y });
+                        return Some(Action::request_redraw().and_capture());
+                    }
+                    // Clicking the track outside the thumb pages by one screenful.
+                    let page = if p.y < thumb.y { -(rows as i64) } else { rows as i64 };
+                    return Some(Action::publish(ViewMessage::ScrollRows(page)).and_capture());
+                }
+                if h_track.contains(p) {
+                    let cols = self.visible_cols();
+                    let thumb = h_thumb(self.max_left(), cols, self.left_col, h_track)?;
+                    if thumb.contains(p) {
+                        state.drag = Some(Drag { vertical: false, grab: p.x - thumb.x });
+                        return Some(Action::request_redraw().and_capture());
+                    }
+                    let page = if p.x < thumb.x { -(cols as i64) } else { cols as i64 };
+                    return Some(Action::publish(ViewMessage::ScrollCols(page)).and_capture());
+                }
+                if !content.contains(p) {
+                    return None;
+                }
+
+                let row = self.row_at(p);
+                if row >= count {
+                    return None;
+                }
+                let now = Instant::now();
+                let double = state
+                    .last_click
+                    .is_some_and(|(at, last_row)| last_row == row && now - at < DOUBLE_CLICK);
+                state.last_click = if double { None } else { Some((now, row)) };
+                let message = if self.mode == LogViewMode::Templates && double {
+                    ViewMessage::Activate(row)
+                } else {
+                    ViewMessage::Select(row)
+                };
+                Some(Action::publish(message).and_capture())
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.drag.take()?;
+                Some(Action::request_redraw())
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some(drag) = state.drag {
+                    let p = cursor.position_from(bounds.position())?;
+                    return if drag.vertical {
+                        let thumb = v_thumb(count, rows, self.top, v_track)?;
+                        let span = v_track.height - thumb.height;
+                        let at = ((p.y - drag.grab) / span).clamp(0.0, 1.0);
+                        let top = (at * count.saturating_sub(rows) as f32).round() as i64;
+                        Some(Action::publish(ViewMessage::ScrollTo(top)))
+                    } else {
+                        let max_left = self.max_left();
+                        let thumb = h_thumb(max_left, self.visible_cols(), self.left_col, h_track)?;
+                        let span = h_track.width - thumb.width;
+                        let at = ((p.x - h_track.x - drag.grab) / span).clamp(0.0, 1.0);
+                        let col = (at * max_left as f32).round() as i64;
+                        Some(Action::publish(ViewMessage::ScrollColTo(col)))
+                    };
+                }
+
+                let p = cursor.position_in(bounds);
+                let hot = p.and_then(|p| {
+                    if v_track.contains(p) {
+                        Some(true)
+                    } else if h_track.contains(p) {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                });
+                let hover_row = p
+                    .filter(|p| content.contains(*p))
+                    .map(|p| self.row_at(p))
+                    .filter(|row| *row < count);
+                if hot != state.hot || hover_row != state.hover_row {
+                    state.hot = hot;
+                    state.hover_row = hover_row;
+                    return Some(Action::request_redraw());
+                }
+                None
+            }
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                state.hot = None;
+                state.hover_row = None;
+                Some(Action::request_redraw())
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                cursor.position_in(bounds)?;
+                let (x, y) = match *delta {
+                    mouse::ScrollDelta::Lines { x, y } => (x * WHEEL_ROWS, y * WHEEL_ROWS),
+                    mouse::ScrollDelta::Pixels { x, y } => (x / CHAR_W, y / ROW_H),
+                };
+                let message = if x.abs() > y.abs() {
+                    ViewMessage::ScrollCols(-x.round() as i64)
+                } else {
+                    ViewMessage::ScrollRows(-y.round() as i64)
+                };
+                // The hover highlight follows the content under a still pointer.
+                state.hover_row = None;
+                Some(Action::publish(message).and_capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        state: &CanvasState,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        self.viewport.set(Size::new(
+            (bounds.width - SCROLLBAR).max(0.0),
+            (bounds.height - SCROLLBAR).max(0.0),
+        ));
+
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), theme::BG);
+
+        if self.mode == LogViewMode::Templates {
+            self.paint_templates(&mut frame, state.hover_row);
+        } else if self.file.is_some() {
+            self.paint_lines(&mut frame, state.hover_row);
+        }
+        self.paint_scrollbars(&mut frame, bounds.size(), state);
+
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &CanvasState,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if state.drag.is_some() {
+            return mouse::Interaction::Grabbing;
+        }
+        if self.mode == LogViewMode::Templates
+            && cursor.position_in(bounds).is_some_and(|p| self.row_at(p) < self.templates.len())
+            && state.hot.is_none()
+        {
+            return mouse::Interaction::Pointer;
+        }
+        mouse::Interaction::default()
+    }
 }

@@ -1,12 +1,11 @@
-//! The Win32 niceties the C# build reached for via P/Invoke: a light title bar, Windows 11 rounded
-//! corners, and the window icon pulled out of `shell32.dll`.
+//! The Win32 niceties the C# build reached for via P/Invoke: a dark title bar tinted to match the
+//! toolbar, Windows 11 rounded corners, and the window icon pulled out of `shell32.dll`.
 //!
-//! Per-monitor-v2 DPI awareness is *not* here — eframe already declares it in the application
-//! manifest and drives `pixels_per_point` from it, which is what `Native.EnableDpiAwareness` was
-//! buying. Every call below degrades to a no-op rather than failing the app, same as the original's
-//! swallowed exceptions.
+//! Per-monitor-v2 DPI awareness is *not* here — winit already declares it and iced drives its
+//! scale factor from it, which is what `Native.EnableDpiAwareness` was buying. Every call below
+//! degrades to a no-op rather than failing the app, same as the original's swallowed exceptions.
 
-use eframe::egui::IconData;
+use iced::window::Icon;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::DwmSetWindowAttribute;
@@ -23,15 +22,24 @@ const DWMWA_DARK_MODE_1809: u32 = 19;
 /// `DWMWA_WINDOW_CORNER_PREFERENCE`; 2 is `DWMWCP_ROUND`.
 const DWMWA_CORNER_PREFERENCE: u32 = 33;
 const DWMWCP_ROUND: u32 = 2;
+/// Windows 11 caption fill and caption text colours, as `COLORREF` (0x00BBGGRR).
+const DWMWA_CAPTION_COLOR: u32 = 35;
+const DWMWA_TEXT_COLOR: u32 = 36;
 
 fn to_hwnd(handle: u64) -> HWND {
     HWND(handle as *mut core::ffi::c_void)
 }
 
-/// Light title bar (20 on 1903+, 19 on 1809) and rounded corners on Windows 11.
-pub fn apply_chrome(handle: u64) {
+fn colorref(color: iced::Color) -> u32 {
+    let [r, g, b, _] = color.into_rgba8();
+    (b as u32) << 16 | (g as u32) << 8 | r as u32
+}
+
+/// Dark title bar (20 on 1903+, 19 on 1809), tinted to `caption` on Windows 11, and rounded
+/// corners. Older Windows ignores the attributes it doesn't know.
+pub fn apply_chrome(handle: u64, caption: iced::Color, caption_text: iced::Color) {
     let hwnd = to_hwnd(handle);
-    let light: u32 = 0;
+    let dark: u32 = 1;
     unsafe {
         let set = |attr: u32, value: &u32| {
             DwmSetWindowAttribute(
@@ -41,18 +49,20 @@ pub fn apply_chrome(handle: u64) {
                 4,
             )
         };
-        if set(DWMWA_DARK_MODE, &light).is_err() {
-            let _ = set(DWMWA_DARK_MODE_1809, &light);
+        if set(DWMWA_DARK_MODE, &dark).is_err() {
+            let _ = set(DWMWA_DARK_MODE_1809, &dark);
         }
         let round = DWMWCP_ROUND;
         let _ = set(DWMWA_CORNER_PREFERENCE, &round);
+        let _ = set(DWMWA_CAPTION_COLOR, &colorref(caption));
+        let _ = set(DWMWA_TEXT_COLOR, &colorref(caption_text));
     }
 }
 
-/// Extracts icon `index` from a DLL and converts it to the RGBA buffer egui wants for the window
+/// Extracts icon `index` from a DLL and converts it to the RGBA buffer iced wants for the window
 /// icon. Returns `None` on any failure — the original threw here, which would have taken the whole
 /// app down over a decoration.
-pub fn load_dll_icon(dll_path: &str, index: u32) -> Option<IconData> {
+pub fn load_dll_icon(dll_path: &str, index: u32) -> Option<Icon> {
     let wide: Vec<u16> = dll_path.encode_utf16().chain(std::iter::once(0)).collect();
 
     unsafe {
@@ -67,7 +77,7 @@ pub fn load_dll_icon(dll_path: &str, index: u32) -> Option<IconData> {
     }
 }
 
-unsafe fn icon_to_rgba(hicon: HICON) -> Option<IconData> {
+unsafe fn icon_to_rgba(hicon: HICON) -> Option<Icon> {
     let mut info = ICONINFO::default();
     GetIconInfo(hicon, &mut info).ok()?;
 
@@ -124,7 +134,7 @@ unsafe fn icon_to_rgba(hicon: HICON) -> Option<IconData> {
         return None;
     }
 
-    // GDI hands back BGRA; egui wants RGBA.
+    // GDI hands back BGRA; iced wants RGBA.
     let mut opaque = true;
     for px in pixels.chunks_exact_mut(4) {
         px.swap(0, 2);
@@ -139,9 +149,5 @@ unsafe fn icon_to_rgba(hicon: HICON) -> Option<IconData> {
         }
     }
 
-    Some(IconData {
-        rgba: pixels,
-        width,
-        height,
-    })
+    iced::window::icon::from_rgba(pixels, width, height).ok()
 }

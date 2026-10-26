@@ -1,4 +1,4 @@
-//! The window: search bar, tag row, log surface, status strip, and the worker threads that feed
+//! The window: toolbar, tag row, log surface, status strip, and the worker threads that feed
 //! them.
 //!
 //! One structural difference from the C# `MainForm` worth naming. The original kept a `_stale` list
@@ -7,34 +7,46 @@
 //! the mapping instead. Here every worker holds an `Arc<LogFile>`, so the mapping simply outlives
 //! the last reader and unmaps itself. Cancellation stays (it stops useless work); the join
 //! bookkeeping is gone because the hazard it guarded against cannot occur.
+//!
+//! Workers publish progress through atomics, not messages, so while anything is in flight a 50 ms
+//! tick re-reads them; the subscription drops the tick once everything has settled.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{
-    pos2, vec2, Align2, CentralPanel, Context, Frame, Key, Modifiers, Rect, Sense, TextEdit,
-    TopBottomPanel, Ui, ViewportCommand,
-};
 use fastlogviewer_core::{
     CancelToken, FilterIndex, IntersectionIndex, LogFile, LogTemplate, LogViewMode, MatchIndex,
     Matcher, SlotFilterIndex, SlotQuery, TagStore, TemplateIndex, UnionFilterIndex, TAG_PALETTE,
 };
+use iced::keyboard::{self, key::Named, Key};
+use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::{
+    button, canvas, center, column, container, operation, row, scrollable, space, stack, svg,
+    text, text_input, tooltip, Id,
+};
+use iced::{event, window, Alignment, Color, Element, Event, Length, Padding, Subscription, Task};
 use uuid::Uuid;
 
-use crate::log_view::LogView;
-use crate::tag_ui::{self, ChipAction, PopupOutcome, TagEditPopup, CHIP_HEIGHT, CHIP_MARGIN};
-use crate::theme;
-use crate::widgets::{field_frame, status_strip, thousands, thousands_1dp, toggle_button};
+use crate::format::{thousands, thousands_1dp};
+use crate::log_view::{LogView, ViewMessage};
+use crate::tag_ui::{
+    self, goto_view, modal, tag_chip, with_tip, ChipAction, GotoMessage, PopupMessage,
+    PopupOutcome, TagEditPopup,
+};
+use crate::theme::{self, icons};
 use crate::win;
 
-const HINTS: &str =
-    "Ctrl+O open   ·   Ctrl+F search   ·   F3 next   ·   Ctrl+H filter   ·   Ctrl+M patterns";
+const SEARCH_INPUT: Id = Id::new("search");
 
-const BAR_H: f32 = 46.0;
-const TAG_ROW_H: f32 = 42.0;
-const STATUS_H: f32 = 26.0;
+const HINTS: [(&str, &str); 5] = [
+    ("Ctrl O", "open"),
+    ("Ctrl F", "search"),
+    ("F3", "next"),
+    ("Ctrl H", "filter"),
+    ("Ctrl M", "patterns"),
+];
 
 /// Which index the ad-hoc/tag composition settled on, so the zoom layer can ask "is my base ready"
 /// the way the C# did by comparing object references.
@@ -44,6 +56,35 @@ enum Base {
     Intersection,
     AdHoc,
     TagUnion,
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    SearchChanged(String),
+    SearchSubmitted,
+    ToggleRegex,
+    ToggleCase,
+    ToggleFilter,
+    TogglePatterns,
+    OpenDialog,
+    NewTag,
+    Chip(Uuid, ChipAction),
+    Popup(PopupMessage),
+    Goto(GotoMessage),
+    View(ViewMessage),
+    KeyPressed {
+        key: Key,
+        modifiers: keyboard::Modifiers,
+        /// A focused text input already handled it.
+        captured: bool,
+    },
+    ModifiersChanged(keyboard::Modifiers),
+    FileDropped(PathBuf),
+    Tick,
+    /// The HWND is only known once the window exists; the title bar is tinted from there. Opening
+    /// can race the subscription that would see it, so the first focus counts too.
+    WindowShown(window::Id),
+    WindowReady(u64),
 }
 
 pub struct App {
@@ -80,19 +121,17 @@ pub struct App {
     slot_error: Option<String>,
 
     status_left: String,
+    busy: bool,
     type_deadline: Option<Instant>,
+    modifiers: keyboard::Modifiers,
     popup: Option<TagEditPopup>,
     goto_open: bool,
     goto_text: String,
-    goto_focus: bool,
-    search_focus: bool,
     chrome_applied: bool,
 }
 
 impl App {
-    pub fn new(ctx: &Context, initial_file: Option<String>) -> Self {
-        theme::install_fonts(ctx);
-
+    pub fn new(initial_file: Option<String>) -> (Self, Task<Message>) {
         let mut app = App {
             view: LogView::new(),
             file: None,
@@ -122,12 +161,12 @@ impl App {
             slot_ct: None,
             slot_error: None,
             status_left: "Open a log file to begin".to_string(),
+            busy: false,
             type_deadline: None,
+            modifiers: keyboard::Modifiers::default(),
             popup: None,
             goto_open: false,
             goto_text: String::new(),
-            goto_focus: false,
-            search_focus: false,
             chrome_applied: false,
         };
 
@@ -139,7 +178,12 @@ impl App {
                 app.load_file(&path);
             }
         }
-        app
+        app.refresh_status();
+        (app, Task::none())
+    }
+
+    pub fn title(&self) -> String {
+        self.title.clone()
     }
 
     fn sync_view_tags(&mut self) {
@@ -634,9 +678,11 @@ impl App {
 
     // ----------------------------------------------------------------- status
 
-    fn refresh_status(&mut self, ctx: &Context) {
-        let Some(file) = self.file.clone() else { return };
-        self.view.sync_scroll_bars();
+    fn refresh_status(&mut self) {
+        let Some(file) = self.file.clone() else {
+            self.busy = false;
+            return;
+        };
 
         let size = format!("{} MB", thousands_1dp(file.length() as f64 / 1_048_576.0));
         let mut busy = false;
@@ -645,16 +691,16 @@ impl App {
         if file.index_complete() {
             let sel = self.view.selected_actual_line();
             left = format!(
-                "{} lines   ·   {}{}{}",
+                "{} lines  ·  {}{}{}",
                 thousands(file.line_count() as u64),
                 size,
                 if sel >= 0 {
-                    format!("   ·   line {}", thousands(sel as u64 + 1))
+                    format!("  ·  line {}", thousands(sel as u64 + 1))
                 } else {
                     String::new()
                 },
                 if self.view.filter_on() {
-                    "   ·   filtered"
+                    "  ·  filtered"
                 } else {
                     ""
                 }
@@ -667,7 +713,7 @@ impl App {
                 100.0 * file.scanned() as f64 / file.length() as f64
             };
             left = format!(
-                "{} lines   ·   {}   ·   indexing {:.0}%",
+                "{} lines  ·  {}  ·  indexing {:.0}%",
                 thousands(file.line_count() as u64),
                 size,
                 pct
@@ -686,7 +732,7 @@ impl App {
                 100.0 * t.progress() as f64 / t.scope_count() as f64
             };
             left = format!(
-                "clustering… {:.0}%   ·   {} patterns so far",
+                "clustering… {:.0}%  ·  {} patterns so far",
                 pct,
                 thousands(t.template_count() as u64)
             );
@@ -697,13 +743,13 @@ impl App {
             publish_templates = true; // final publish once the build settles
             let t = self.templates.clone().unwrap();
             left = format!(
-                "{} templates   ·   {} lines",
+                "{} templates  ·  {} lines",
                 thousands(t.template_count() as u64),
                 thousands(t.clustered_lines() as u64)
             );
         } else if let Some(zoom) = self.zoom.clone() {
             left = format!(
-                "▲ {}   ·   {} lines",
+                "▲ {}  ·  {} lines",
                 zoom.render(),
                 thousands(zoom.count() as u64)
             );
@@ -764,192 +810,18 @@ impl App {
             self.recompute_active_filter();
         }
 
-        // The C# stopped a 100 ms WinForms timer here; the egui equivalent is to stop asking for
-        // repaints once nothing is in flight.
-        if busy {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
+        // The C# stopped a 100 ms WinForms timer here; `subscription` drops its tick instead.
+        self.busy = busy;
     }
 
-    // ------------------------------------------------------------------ panels
+    // ------------------------------------------------------------------- tags
 
-    fn search_bar(&mut self, ui: &mut Ui) {
-        let rect = ui.max_rect();
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, theme::CHROME);
-        theme::hairline(
-            &painter,
-            theme::BORDER,
-            pos2(rect.left(), rect.bottom() - 1.0),
-            pos2(rect.right(), rect.bottom() - 1.0),
-        );
-
-        let ctl_h = 28.0;
-        let ctl_y = rect.top() + (BAR_H - ctl_h) / 2.0;
-        let pad = 12.0;
-        let gap = 8.0;
-
-        let mut right = rect.right() - pad;
-        let count_rect = Rect::from_min_size(pos2(right - 130.0, ctl_y), vec2(130.0, ctl_h));
-        right -= 130.0 + gap;
-        let filter_rect = Rect::from_min_size(pos2(right - 60.0, ctl_y), vec2(60.0, ctl_h));
-        right -= 60.0 + 6.0;
-        let case_rect = Rect::from_min_size(pos2(right - 38.0, ctl_y), vec2(38.0, ctl_h));
-        right -= 38.0 + 6.0;
-        let regex_rect = Rect::from_min_size(pos2(right - 38.0, ctl_y), vec2(38.0, ctl_h));
-        right -= 38.0 + gap;
-        let field_w = (right - (rect.left() + pad)).max(120.0);
-        let field_rect = Rect::from_min_size(pos2(rect.left() + pad, ctl_y), vec2(field_w, ctl_h));
-
-        theme::text_in(
-            &painter,
-            count_rect,
-            Align2::RIGHT_CENTER,
-            &self.count_text,
-            theme::ui_font(8.5),
-            if self.count_error {
-                theme::ERROR
-            } else {
-                theme::TEXT_DIM
-            },
-        );
-
-        if toggle_button(
-            ui,
-            filter_rect,
-            "Filter",
-            theme::ui_font(8.5),
-            &mut self.filter_on,
-            "Show only matching lines  (Ctrl+H)",
-        ) {
-            self.recompute_active_filter();
-        }
-
-        let mut case_on = self.case_on;
-        if toggle_button(
-            ui,
-            case_rect,
-            "Aa",
-            theme::mono(9.0),
-            &mut case_on,
-            "Match case",
-        ) {
-            self.case_on = case_on;
-            self.start_match_scan();
-        }
-
-        let mut regex_on = self.regex_on;
-        if toggle_button(
-            ui,
-            regex_rect,
-            ".*",
-            theme::mono(9.0),
-            &mut regex_on,
-            "Treat the pattern as a regular expression",
-        ) {
-            self.regex_on = regex_on;
-            self.start_match_scan();
-        }
-
-        let edit_id = ui.id().with("search_edit");
-        let focused = ui.ctx().memory(|m| m.has_focus(edit_id));
-        let inner = field_frame(ui, field_rect, focused);
-        let edit_rect = Rect::from_center_size(inner.center(), vec2(inner.width(), 20.0));
-
-        let response = ui.put(
-            edit_rect,
-            TextEdit::singleline(&mut self.search)
-                .id(edit_id)
-                .frame(false)
-                .hint_text("Search…")
-                .font(theme::mono(10.0))
-                .text_color(theme::TEXT),
-        );
-
-        if response.changed() {
-            // Debounce typing, same 250 ms the C# `_typeTimer` used.
-            self.type_deadline = Some(Instant::now() + Duration::from_millis(250));
-        }
-        if self.search_focus {
-            self.search_focus = false;
-            response.request_focus();
-            ui.ctx().memory_mut(|m| m.request_focus(edit_id));
-        }
-
-        // Enter / Escape inside the search box, the C# `Search_KeyDown`.
-        if focused {
-            let (enter, shift, escape) = ui.ctx().input_mut(|i| {
-                (
-                    i.consume_key(Modifiers::NONE, Key::Enter)
-                        || i.consume_key(Modifiers::SHIFT, Key::Enter),
-                    i.modifiers.shift,
-                    i.consume_key(Modifiers::NONE, Key::Escape),
-                )
-            });
-            if enter {
-                if self.type_deadline.is_some() {
-                    self.start_match_scan();
-                }
-                self.jump_match(if shift { -1 } else { 1 });
-            } else if escape {
-                if !self.search.is_empty() {
-                    self.search.clear();
-                    self.start_match_scan();
-                    ui.ctx().memory_mut(|m| m.surrender_focus(edit_id));
-                } else {
-                    self.step_out_one_zoom_level();
-                }
-            }
-        }
-    }
-
-    fn tag_row(&mut self, ui: &mut Ui) {
-        let font = theme::ui_font(8.5);
-        let tags = self.tag_store.tags.clone();
-        let mut actions: Vec<(Uuid, ChipAction)> = Vec::new();
-        let mut add_clicked = false;
-
-        eframe::egui::ScrollArea::horizontal()
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    for tag in &tags {
-                        let width = tag_ui::chip_width(ui.ctx(), tag, &font);
-                        let (rect, _) = ui.allocate_exact_size(
-                            vec2(width, CHIP_HEIGHT),
-                            Sense::hover(),
-                        );
-                        let action = tag_ui::tag_chip(ui, tag, rect, font.clone());
-                        if action != ChipAction::None {
-                            actions.push((tag.id, action));
-                        }
-                        ui.add_space(CHIP_MARGIN * 2.0);
-                    }
-                    // The + chip always stays last.
-                    let (rect, _) =
-                        ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
-                    add_clicked = tag_ui::add_tag_chip(ui, rect, theme::ui_font(11.0));
-                });
-            });
-
-        for (id, action) in actions {
-            self.apply_chip_action(id, action);
-        }
-        if add_clicked {
-            self.popup = Some(TagEditPopup::new_tag(
-                self.tag_store.tags.len() % TAG_PALETTE.len(),
-            ));
-        }
-    }
-
-    fn apply_chip_action(&mut self, id: Uuid, action: ChipAction) {
+    fn apply_chip_action(&mut self, id: Uuid, action: ChipAction) -> Task<Message> {
         let Some(index) = self.tag_store.tags.iter().position(|t| t.id == id) else {
-            return;
+            return Task::none();
         };
 
         match action {
-            ChipAction::None => {}
             ChipAction::ToggleHighlight => {
                 self.tag_store.tags[index].highlight_on = !self.tag_store.tags[index].highlight_on;
                 self.tag_store.save();
@@ -975,8 +847,10 @@ impl App {
             }
             ChipAction::Edit => {
                 self.popup = Some(TagEditPopup::edit(&self.tag_store.tags[index]));
+                return operation::focus(tag_ui::TAG_LABEL_INPUT);
             }
         }
+        Task::none()
     }
 
     fn commit_popup(&mut self, popup: TagEditPopup) {
@@ -1023,191 +897,539 @@ impl App {
         self.sync_view_tags();
     }
 
-    fn goto_window(&mut self, ctx: &Context) {
-        let mut go = false;
-        let mut close = false;
+    // ------------------------------------------------------------------ update
 
-        eframe::egui::Window::new("Go to line")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .default_width(250.0)
-            .show(ctx, |ui| {
-                let response = ui.add(
-                    TextEdit::singleline(&mut self.goto_text).desired_width(f32::INFINITY),
-                );
-                if self.goto_focus {
-                    self.goto_focus = false;
-                    response.request_focus();
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(ui.available_width() - 80.0);
-                    if ui.button("Go").clicked() {
-                        go = true;
-                    }
-                });
-                if ui.input(|i| i.key_pressed(Key::Enter)) {
-                    go = true;
-                }
-                if ui.input(|i| i.key_pressed(Key::Escape)) {
-                    close = true;
-                }
-            });
-
-        if go {
-            if let (Ok(n), Some(file)) = (
-                self.goto_text.trim().parse::<i64>(),
-                self.file.clone(),
-            ) {
-                let last = file.line_count() as i64 - 1;
-                self.view.go_to_actual((n - 1).clamp(0, last.max(0)));
-            }
-            close = true;
-        }
-        if close {
-            self.goto_open = false;
-            self.goto_text.clear();
-        }
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.apply(message);
+        self.refresh_status();
+        task
     }
-}
 
-impl eframe::App for App {
-    fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
-        if !self.chrome_applied {
-            self.chrome_applied = true;
-            apply_window_chrome(frame);
-        }
-        ctx.send_viewport_cmd(ViewportCommand::Title(self.title.clone()));
-
-        // --- drag and drop ---
-        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(path) = dropped.iter().filter_map(|f| f.path.clone()).next() {
-            self.load_file(&path.to_string_lossy());
-        }
-
-        // --- debounced typing ---
-        if let Some(deadline) = self.type_deadline {
-            if Instant::now() >= deadline {
+    fn apply(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::SearchChanged(search) => {
+                self.search = search;
+                // Debounce typing, same 250 ms the C# `_typeTimer` used.
+                self.type_deadline = Some(Instant::now() + Duration::from_millis(250));
+            }
+            Message::SearchSubmitted => {
+                if self.type_deadline.is_some() {
+                    self.start_match_scan();
+                }
+                self.jump_match(if self.modifiers.shift() { -1 } else { 1 });
+            }
+            Message::ToggleRegex => {
+                self.regex_on = !self.regex_on;
                 self.start_match_scan();
-            } else {
-                ctx.request_repaint_after(Duration::from_millis(50));
             }
-        }
-
-        // --- global shortcuts, the C# ProcessCmdKey ---
-        let modal_open = self.popup.is_some() || self.goto_open;
-        if !modal_open {
-            // `Modifiers::COMMAND`, not `CTRL`: on Windows a real ctrl press sets both `ctrl` and
-            // `command`, and egui's matcher rejects a `CTRL` pattern against it.
-            let (open, find, filter, goto, patterns, next, prev) = ctx.input_mut(|i| {
-                (
-                    i.consume_key(Modifiers::COMMAND, Key::O),
-                    i.consume_key(Modifiers::COMMAND, Key::F),
-                    i.consume_key(Modifiers::COMMAND, Key::H),
-                    i.consume_key(Modifiers::COMMAND, Key::G),
-                    i.consume_key(Modifiers::COMMAND, Key::M),
-                    i.consume_key(Modifiers::NONE, Key::F3),
-                    i.consume_key(Modifiers::SHIFT, Key::F3),
-                )
-            });
-            if open {
-                self.open_dialog();
+            Message::ToggleCase => {
+                self.case_on = !self.case_on;
+                self.start_match_scan();
             }
-            if find {
-                self.search_focus = true;
-            }
-            if filter {
+            Message::ToggleFilter => {
                 self.filter_on = !self.filter_on;
                 self.recompute_active_filter();
             }
-            if goto && self.file.is_some() {
-                self.goto_open = true;
-                self.goto_focus = true;
+            Message::TogglePatterns => self.toggle_semantic_zoom(),
+            Message::OpenDialog => self.open_dialog(),
+            Message::NewTag => {
+                self.popup = Some(TagEditPopup::new_tag(
+                    self.tag_store.tags.len() % TAG_PALETTE.len(),
+                ));
+                return operation::focus(tag_ui::TAG_LABEL_INPUT);
             }
-            if patterns {
-                self.toggle_semantic_zoom();
+            Message::Chip(id, action) => return self.apply_chip_action(id, action),
+            Message::Popup(message) => {
+                let Some(popup) = self.popup.as_mut() else {
+                    return Task::none();
+                };
+                match popup.update(message) {
+                    PopupOutcome::Open => {}
+                    PopupOutcome::Accepted => {
+                        let popup = self.popup.take().expect("checked above");
+                        self.commit_popup(popup);
+                    }
+                    PopupOutcome::Cancelled => self.popup = None,
+                }
             }
-            if next {
-                self.jump_match(1);
+            Message::Goto(message) => match message {
+                GotoMessage::Input(text) => self.goto_text = text,
+                GotoMessage::Go => {
+                    if let (Ok(n), Some(file)) =
+                        (self.goto_text.trim().parse::<i64>(), self.file.clone())
+                    {
+                        let last = file.line_count() as i64 - 1;
+                        self.view.go_to_actual((n - 1).clamp(0, last.max(0)));
+                    }
+                    self.close_goto();
+                }
+                GotoMessage::Cancel => self.close_goto(),
+            },
+            Message::View(message) => match message {
+                ViewMessage::ScrollRows(delta) => self.view.scroll_by(delta),
+                ViewMessage::ScrollCols(delta) => self.view.scroll_cols_by(delta),
+                ViewMessage::ScrollTo(top) => self.view.scroll_to(top),
+                ViewMessage::ScrollColTo(col) => self.view.scroll_cols_to(col),
+                ViewMessage::Select(row) => self.view.select(row),
+                ViewMessage::Activate(row) => {
+                    self.view.select(row);
+                    self.zoom_into_selected_template();
+                }
+            },
+            Message::KeyPressed {
+                key,
+                modifiers,
+                captured,
+            } => return self.handle_key(key, modifiers, captured),
+            Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
+            Message::FileDropped(path) => self.load_file(&path.to_string_lossy()),
+            Message::Tick => {
+                if self.type_deadline.is_some_and(|d| Instant::now() >= d) {
+                    self.start_match_scan();
+                }
             }
-            if prev {
-                self.jump_match(-1);
+            Message::WindowShown(id) if !self.chrome_applied => {
+                self.chrome_applied = true;
+                return window::raw_id::<Message>(id).map(Message::WindowReady);
+            }
+            Message::WindowShown(_) => {}
+            Message::WindowReady(handle) => {
+                win::apply_chrome(handle, theme::SURFACE, theme::TEXT_DIM)
+            }
+        }
+        Task::none()
+    }
+
+    fn close_goto(&mut self) {
+        self.goto_open = false;
+        self.goto_text.clear();
+    }
+
+    /// Global shortcuts first (the C# `ProcessCmdKey`), then whatever the log surface owns — but
+    /// only for keys no text input claimed, which is how WinForms split it from
+    /// `LogView.OnKeyDown`.
+    fn handle_key(
+        &mut self,
+        key: Key,
+        modifiers: keyboard::Modifiers,
+        captured: bool,
+    ) -> Task<Message> {
+        if self.popup.is_some() || self.goto_open {
+            if key == Key::Named(Named::Escape) {
+                self.popup = None;
+                self.close_goto();
+            }
+            return Task::none();
+        }
+
+        if modifiers.command() {
+            if let Key::Character(c) = &key {
+                match c.to_lowercase().as_str() {
+                    "o" => {
+                        self.open_dialog();
+                        return Task::none();
+                    }
+                    "f" => {
+                        return operation::focus(SEARCH_INPUT)
+                            .chain(operation::select_all(SEARCH_INPUT));
+                    }
+                    "h" => {
+                        self.filter_on = !self.filter_on;
+                        self.recompute_active_filter();
+                        return Task::none();
+                    }
+                    "g" if self.file.is_some() => {
+                        self.goto_open = true;
+                        return operation::focus(tag_ui::GOTO_INPUT);
+                    }
+                    "m" => {
+                        self.toggle_semantic_zoom();
+                        return Task::none();
+                    }
+                    _ => {}
+                }
             }
         }
 
-        // --- keys the log surface owns, when no editor has focus ---
-        let editor_focused = ctx.memory(|m| m.focused().is_some());
-        if !editor_focused && !modal_open {
-            let events = self.view.handle_keys(ctx);
-            if events.template_activated {
-                self.zoom_into_selected_template();
+        match key {
+            Key::Named(Named::F3) => {
+                self.jump_match(if modifiers.shift() { -1 } else { 1 });
+                return Task::none();
             }
-            if events.escape_pressed {
-                self.step_out_one_zoom_level();
+            // Escape inside the search box (it unfocuses itself): clear it, or step out when
+            // there is nothing to clear — the C# `Search_KeyDown`.
+            Key::Named(Named::Escape) if captured => {
+                if !self.search.is_empty() {
+                    self.search.clear();
+                    self.start_match_scan();
+                } else {
+                    self.step_out_one_zoom_level();
+                }
+                return Task::none();
             }
+            _ if captured => return Task::none(),
+            _ => {}
         }
 
-        // --- panels ---
-        TopBottomPanel::top("search_bar")
-            .exact_height(BAR_H)
-            .frame(Frame::none().fill(theme::CHROME))
-            .show(ctx, |ui| self.search_bar(ui));
-
-        TopBottomPanel::top("tag_row")
-            .exact_height(TAG_ROW_H)
-            .frame(Frame::none().fill(theme::BG).inner_margin(
-                eframe::egui::Margin::symmetric(0.0, 4.0),
-            ))
-            .show(ctx, |ui| self.tag_row(ui));
-
-        TopBottomPanel::bottom("status")
-            .exact_height(STATUS_H)
-            .frame(Frame::none())
-            .show(ctx, |ui| {
-                status_strip(
-                    ui,
-                    ui.max_rect(),
-                    &self.status_left,
-                    HINTS,
-                    theme::TEXT_DIM,
-                    theme::ui_font(8.5),
-                );
-            });
-
-        let events = CentralPanel::default()
-            .frame(Frame::none().fill(theme::BG))
-            .show(ctx, |ui| self.view.ui(ui))
-            .inner;
-
-        if events.template_activated {
+        let outcome = self.view.handle_key(&key, modifiers);
+        if outcome.template_activated {
             self.zoom_into_selected_template();
         }
-        if events.escape_pressed {
+        if outcome.escape_pressed {
             self.step_out_one_zoom_level();
         }
+        match outcome.copy {
+            Some(text) => iced::clipboard::write(text),
+            None => Task::none(),
+        }
+    }
 
-        // --- dialogs ---
-        if let Some(mut popup) = self.popup.take() {
-            match popup.show(ctx) {
-                PopupOutcome::Open => self.popup = Some(popup),
-                PopupOutcome::Accepted => self.commit_popup(popup),
-                PopupOutcome::Cancelled => {}
+    pub fn subscription(&self) -> Subscription<Message> {
+        let events = event::listen_with(|event, status, window| match event {
+            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                Some(Message::KeyPressed {
+                    key,
+                    modifiers,
+                    captured: status == event::Status::Captured,
+                })
             }
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                Some(Message::ModifiersChanged(modifiers))
+            }
+            Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
+            Event::Window(window::Event::Opened { .. } | window::Event::Focused) => {
+                Some(Message::WindowShown(window))
+            }
+            _ => None,
+        });
+
+        if self.busy || self.type_deadline.is_some() {
+            Subscription::batch([
+                events,
+                iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick),
+            ])
+        } else {
+            events
         }
-        if self.goto_open {
-            self.goto_window(ctx);
+    }
+
+    // -------------------------------------------------------------------- view
+
+    pub fn view(&self) -> Element<'_, Message> {
+        let surface: Element<'_, Message> = if self.file.is_some() {
+            Element::from(canvas(&self.view).width(Length::Fill).height(Length::Fill))
+                .map(Message::View)
+        } else {
+            self.empty_state()
+        };
+
+        let mut layout = column![self.toolbar(), rule(), self.tag_bar(), rule()];
+        if let Some(crumb) = self.breadcrumb() {
+            layout = layout.push(crumb).push(rule());
+        }
+        let layout = layout
+            .push(container(surface).height(Length::Fill).style(theme::log_surface))
+            .push(rule())
+            .push(self.status_bar());
+
+        let base = container(layout)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::log_surface);
+
+        if let Some(popup) = &self.popup {
+            stack![base, modal(popup.view().map(Message::Popup))].into()
+        } else if self.goto_open {
+            let lines = self.file.as_ref().map_or(0, |f| f.line_count());
+            stack![base, modal(goto_view(&self.goto_text, lines).map(Message::Goto))].into()
+        } else {
+            base.into()
+        }
+    }
+
+    fn toolbar(&self) -> Element<'_, Message> {
+        let has_file = self.file.is_some();
+
+        let open = with_tip(
+            button(icon(icons::FOLDER, 16.0, theme::TEXT_DIM))
+                .padding(8)
+                .style(theme::ghost)
+                .on_press(Message::OpenDialog),
+            "Open file  (Ctrl+O)",
+            tooltip::Position::Bottom,
+        );
+
+        let placeholder = if self.view.mode() == LogViewMode::Templates {
+            "Filter patterns…"
+        } else if self.zoom.is_some() {
+            "Search this pattern, or filter slots: slot2 > 2000 AND slot1 = warn"
+        } else {
+            "Search…"
+        };
+        // Leave room on the right for the match count drawn over the input.
+        let count_room = self.count_text.chars().count() as f32 * 7.0 + 16.0;
+        let input = text_input(placeholder, &self.search)
+            .id(SEARCH_INPUT)
+            .on_input(Message::SearchChanged)
+            .on_submit(Message::SearchSubmitted)
+            .font(theme::MONO)
+            .size(theme::MONO_SIZE)
+            .padding(Padding {
+                top: 8.0,
+                bottom: 8.0,
+                left: 36.0,
+                right: count_room,
+            })
+            .style(theme::input);
+        let count = text(&self.count_text)
+            .size(theme::SMALL_SIZE)
+            .color(if self.count_error { theme::ERROR } else { theme::TEXT_DIM });
+        let search = stack![
+            input,
+            container(icon(icons::SEARCH, 15.0, theme::TEXT_FAINT))
+                .padding([0, 12])
+                .height(Length::Fill)
+                .align_y(Alignment::Center),
+            container(count)
+                .padding([0, 12])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::End)
+                .align_y(Alignment::Center),
+        ]
+        .width(Length::Fill);
+
+        let toggle = |label: &'static str, mono: bool, on: bool, message: Message, tip: &'static str| {
+            let label = text(label)
+                .size(if mono { theme::MONO_SIZE } else { theme::UI_SIZE })
+                .font(if mono { theme::MONO } else { theme::UI })
+                .height(Length::Fill)
+                .align_y(Alignment::Center);
+            with_tip(
+                button(label)
+                    .height(30)
+                    .padding([0, 10])
+                    .style(theme::toggle(on))
+                    .on_press(message),
+                tip,
+                tooltip::Position::Bottom,
+            )
+        };
+        let options = container(
+            row![
+                toggle(".*", true, self.regex_on, Message::ToggleRegex, "Regular expression"),
+                toggle("Aa", true, self.case_on, Message::ToggleCase, "Match case"),
+                toggle(
+                    "Filter",
+                    false,
+                    self.filter_on,
+                    Message::ToggleFilter,
+                    "Show only matching lines  (Ctrl+H)"
+                ),
+            ]
+            .spacing(2),
+        )
+        .padding(2)
+        .style(theme::segmented);
+
+        let patterns_on = self.view.mode() == LogViewMode::Templates || self.zoom.is_some();
+        let patterns = with_tip(
+            button(
+                row![
+                    icon(
+                        icons::LAYERS,
+                        14.0,
+                        if patterns_on { theme::ACCENT } else { theme::TEXT_DIM }
+                    ),
+                    text("Patterns").size(theme::UI_SIZE),
+                ]
+                .spacing(7)
+                .height(Length::Fill)
+                .align_y(Alignment::Center),
+            )
+            .height(34)
+            .padding([0, 12])
+            .style(theme::toggle(patterns_on))
+            .on_press_maybe(has_file.then_some(Message::TogglePatterns)),
+            "Group similar lines into patterns  (Ctrl+M)",
+            tooltip::Position::Bottom,
+        );
+
+        container(
+            row![open, search, options, patterns]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        )
+        .padding([10, 12])
+        .width(Length::Fill)
+        .style(theme::surface)
+        .into()
+    }
+
+    fn tag_bar(&self) -> Element<'_, Message> {
+        let mut chips = row![text("TAGS").size(10.5).color(theme::TEXT_FAINT)]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .padding([0, 12]);
+        for tag in &self.tag_store.tags {
+            chips = chips.push(tag_chip(tag, Message::Chip));
+        }
+        chips = chips.push(with_tip(
+            button(
+                row![
+                    icon(icons::PLUS, 12.0, theme::TEXT_DIM),
+                    text("New tag").size(theme::SMALL_SIZE),
+                ]
+                .spacing(5)
+                .align_y(Alignment::Center),
+            )
+            .padding([4, 10])
+            .style(theme::secondary)
+            .on_press(Message::NewTag),
+            "Add a saved highlight / filter",
+            tooltip::Position::Bottom,
+        ));
+
+        container(
+            scrollable(chips)
+                .direction(Direction::Horizontal(Scrollbar::new().width(0).scroller_width(0))),
+        )
+        // Fixed, so adding the first chip (a touch taller than the button) doesn't nudge the log.
+        .height(42)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .style(theme::surface)
+        .into()
+    }
+
+    /// Names the zoom level when semantic zoom is active, with the keys that move between levels.
+    fn breadcrumb(&self) -> Option<Element<'_, Message>> {
+        let pill = |label: &'static str| {
+            container(text(label).size(10.5))
+                .padding([2, 8])
+                .style(theme::pill(theme::ACCENT))
+        };
+        let hint = |hint: &'static str| text(hint).size(theme::SMALL_SIZE).color(theme::TEXT_FAINT);
+
+        let content = if self.view.mode() == LogViewMode::Templates {
+            let count = self.templates.as_ref().map_or(0, |t| t.template_count());
+            row![
+                pill("PATTERNS"),
+                text(format!("{} patterns, most frequent first", thousands(count as u64)))
+                    .size(theme::SMALL_SIZE)
+                    .color(theme::TEXT_DIM),
+                space().width(Length::Fill),
+                hint("↑↓ select  ·  Enter show lines  ·  Esc back"),
+            ]
+        } else {
+            let zoom = self.zoom.as_ref()?;
+            row![
+                pill("PATTERN"),
+                text(zoom.render())
+                    .font(theme::MONO)
+                    .size(theme::SMALL_SIZE)
+                    .wrapping(text::Wrapping::None),
+                space().width(Length::Fill),
+                hint("Esc back to patterns"),
+            ]
+        };
+
+        Some(
+            container(content.spacing(10).align_y(Alignment::Center))
+                .padding([6, 12])
+                .width(Length::Fill)
+                .clip(true)
+                .style(theme::breadcrumb)
+                .into(),
+        )
+    }
+
+    fn status_bar(&self) -> Element<'_, Message> {
+        let dot = if self.busy {
+            theme::ACCENT
+        } else if self.file.is_some() {
+            theme::INFO
+        } else {
+            theme::TEXT_FAINT
+        };
+
+        let mut bar = row![
+            container(space()).width(7).height(7).style(theme::dot(dot)),
+            text(&self.status_left)
+                .size(theme::SMALL_SIZE)
+                .color(theme::TEXT_DIM)
+                .wrapping(text::Wrapping::None),
+            space().width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        for (keys, label) in HINTS {
+            bar = bar.push(
+                row![
+                    container(text(keys).font(theme::MONO).size(10.5))
+                        .padding([1, 5])
+                        .style(theme::kbd),
+                    text(label).size(theme::SMALL_SIZE).color(theme::TEXT_FAINT),
+                ]
+                .spacing(5)
+                .align_y(Alignment::Center),
+            );
         }
 
-        self.refresh_status(ctx);
+        container(bar.spacing(12))
+            .padding([5, 12])
+            .width(Length::Fill)
+            .clip(true)
+            .style(theme::surface)
+            .into()
+    }
+
+    fn empty_state(&self) -> Element<'_, Message> {
+        center(
+            column![
+                container(icon(icons::FILE, 40.0, theme::TEXT_FAINT))
+                    .padding(18)
+                    .style(theme::segmented),
+                space().height(4),
+                text("No log file open").size(18),
+                text("Drop a file anywhere in this window, or open one to start.")
+                    .size(theme::UI_SIZE)
+                    .color(theme::TEXT_DIM),
+                space().height(6),
+                button(
+                    row![
+                        icon(icons::FOLDER, 14.0, theme::ON_ACCENT),
+                        text("Open file…").size(theme::UI_SIZE),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([8, 16])
+                .style(theme::primary)
+                .on_press(Message::OpenDialog),
+                text("or press Ctrl+O").size(theme::SMALL_SIZE).color(theme::TEXT_FAINT),
+            ]
+            .spacing(10)
+            .align_x(Alignment::Center),
+        )
+        .style(theme::log_surface)
+        .into()
     }
 }
 
-fn apply_window_chrome(frame: &eframe::Frame) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    if let Ok(handle) = frame.window_handle() {
-        if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-            win::apply_chrome(win32.hwnd.get() as u64);
-        }
-    }
+fn icon<'a>(bytes: &'static [u8], size: f32, color: Color) -> svg::Svg<'a> {
+    svg(svg::Handle::from_memory(bytes))
+        .width(size)
+        .height(size)
+        .style(theme::icon(color))
+}
+
+/// A one-pixel horizontal divider.
+fn rule<'a>() -> Element<'a, Message> {
+    container(space())
+        .width(Length::Fill)
+        .height(1)
+        .style(theme::divider)
+        .into()
 }

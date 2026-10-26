@@ -1,147 +1,152 @@
-//! Tag chips and the tag editor dialog.
+//! Tag chips, and the two modal dialogs: the tag editor and go-to-line.
 
-use eframe::egui::{pos2, vec2, Align2, Color32, Context, FontId, Id, Rect, Sense, Ui, Vec2};
 use fastlogviewer_core::{Matcher, TagDef, TAG_PALETTE};
+use iced::widget::{
+    button, center, checkbox, column, container, opaque, row, space, text, text_input, tooltip,
+    Id,
+};
+use iced::{Alignment, Color, Element, Length};
 use uuid::Uuid;
 
 use crate::theme;
 
-pub const CHIP_HEIGHT: f32 = 26.0;
-pub const CHIP_MARGIN: f32 = 4.0;
+pub const TAG_LABEL_INPUT: Id = Id::new("tag_label");
+pub const GOTO_INPUT: Id = Id::new("goto_line");
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChipAction {
-    None,
     ToggleHighlight,
     ToggleFilter,
     Remove,
     Edit,
 }
 
-fn text_width(ctx: &Context, text: &str, font: &FontId) -> f32 {
-    ctx.fonts(|f| {
-        f.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE)
-            .size()
-            .x
-    })
-}
-
-/// label + H + F + x + padding, the same measurement the C# chip did in `MeasureWidth`.
-pub fn chip_width(ctx: &Context, tag: &TagDef, font: &FontId) -> f32 {
-    text_width(ctx, &tag.label, font) + 70.0
-}
-
-pub fn tag_chip(ui: &mut Ui, tag: &TagDef, rect: Rect, font: FontId) -> ChipAction {
-    let response = ui.interact(rect, Id::new(("chip", tag.id)), Sense::click());
-    let pointer = ui.ctx().pointer_latest_pos();
-
+fn tag_color(tag: &TagDef) -> Color {
     let [r, g, b] = tag.color();
-    let base = Color32::from_rgb(r, g, b);
-    let bg = Color32::from_rgba_unmultiplied(r, g, b, 40);
-
-    let inner = Rect::from_min_max(rect.min, rect.max - Vec2::splat(1.0));
-    let painter = ui.painter_at(rect);
-    theme::fill_round(&painter, bg, inner, 6.0);
-    theme::draw_round(&painter, base, inner, 6.0);
-
-    let label_w = text_width(ui.ctx(), &tag.label, &font);
-    let mut x = rect.left() + 8.0;
-
-    theme::text_in(
-        &painter,
-        Rect::from_min_size(pos2(x, rect.top()), vec2(label_w, rect.height())),
-        Align2::LEFT_CENTER,
-        &tag.label,
-        font.clone(),
-        theme::TEXT,
-    );
-    x += label_w + 8.0;
-
-    let h_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(16.0, rect.height()));
-    x += 16.0;
-    let f_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(16.0, rect.height()));
-    x += 16.0 + 4.0;
-    let x_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(18.0, rect.height()));
-
-    let hovers = |r: Rect| pointer.is_some_and(|p| r.contains(p));
-
-    draw_glyph(
-        &painter,
-        h_rect,
-        "H",
-        tag.highlight_on,
-        base,
-        hovers(h_rect),
-        font.clone(),
-    );
-    draw_glyph(
-        &painter,
-        f_rect,
-        "F",
-        tag.filter_on,
-        base,
-        hovers(f_rect),
-        font.clone(),
-    );
-    painter.text(
-        x_rect.center(),
-        Align2::CENTER_CENTER,
-        "×",
-        font,
-        if hovers(x_rect) {
-            theme::ERROR
-        } else {
-            theme::TEXT_FAINT
-        },
-    );
-
-    if !response.clicked() {
-        return ChipAction::None;
-    }
-    match response.interact_pointer_pos() {
-        Some(p) if x_rect.contains(p) => ChipAction::Remove,
-        Some(p) if h_rect.contains(p) => ChipAction::ToggleHighlight,
-        Some(p) if f_rect.contains(p) => ChipAction::ToggleFilter,
-        _ => ChipAction::Edit,
-    }
+    Color::from_rgb8(r, g, b)
 }
 
-fn draw_glyph(
-    painter: &eframe::egui::Painter,
-    rect: Rect,
-    text: &str,
-    on: bool,
-    on_color: Color32,
-    hover: bool,
-    font: FontId,
-) {
-    let color = if on {
-        on_color
-    } else if hover {
-        theme::TEXT_DIM
-    } else {
-        theme::TEXT_FAINT
+/// Small text with a styled tooltip; every icon-ish control in the window uses one.
+pub fn with_tip<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    tip: &'a str,
+    position: tooltip::Position,
+) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(tip).size(theme::SMALL_SIZE))
+            .padding([4, 8])
+            .style(theme::tooltip),
+        position,
+    )
+    .gap(6)
+    .into()
+}
+
+/// `● label  H F ×` — clicking the label edits the tag, H and F toggle highlight and filter.
+pub fn tag_chip<'a, Message: Clone + 'a>(
+    tag: &'a TagDef,
+    on_action: impl Fn(Uuid, ChipAction) -> Message + 'a,
+) -> Element<'a, Message> {
+    let color = tag_color(tag);
+    let switch = |label: &'static str, on: bool, action: ChipAction| {
+        button(text(label).size(11).font(theme::MONO).center())
+            .width(20)
+            .height(20)
+            .padding(0)
+            .style(theme::chip_switch(on, color))
+            .on_press(on_action(tag.id, action))
     };
-    painter.text(rect.center(), Align2::CENTER_CENTER, text, font, color);
+
+    let label = button(
+        row![
+            container(space()).width(8).height(8).style(theme::dot(color)),
+            text(&tag.label).size(theme::SMALL_SIZE),
+        ]
+        .spacing(7)
+        .align_y(Alignment::Center),
+    )
+    .padding([3, 4])
+    .style(theme::chip_label)
+    .on_press(on_action(tag.id, ChipAction::Edit));
+
+    container(
+        row![
+            with_tip(label, "Edit tag", tooltip::Position::Bottom),
+            with_tip(
+                switch("H", tag.highlight_on, ChipAction::ToggleHighlight),
+                "Highlight matches",
+                tooltip::Position::Bottom,
+            ),
+            with_tip(
+                switch("F", tag.filter_on, ChipAction::ToggleFilter),
+                "Show only matching lines",
+                tooltip::Position::Bottom,
+            ),
+            button(text("×").size(14).center())
+                .width(20)
+                .height(20)
+                .padding(0)
+                .style(theme::chip_remove)
+                .on_press(on_action(tag.id, ChipAction::Remove)),
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center),
+    )
+    .padding([2, 4])
+    .style(theme::chip(color))
+    .into()
 }
 
-pub fn add_tag_chip(ui: &mut Ui, rect: Rect, font: FontId) -> bool {
-    let response = ui.interact(rect, Id::new("add_tag_chip"), Sense::click());
-    let painter = ui.painter_at(rect);
-    let inner = Rect::from_min_max(rect.min, rect.max - Vec2::splat(1.0));
-    theme::fill_round(&painter, theme::CHROME, inner, 6.0);
-    theme::draw_round(&painter, theme::BORDER, inner, 6.0);
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "+",
-        font,
-        theme::TEXT_DIM,
-    );
-    response.clicked()
+/// Centres `content` over a dimmed backdrop that swallows clicks to the window behind it.
+pub fn modal<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    opaque(center(content).style(theme::backdrop))
+}
+
+fn field_label<'a, Message: 'a>(label: &'a str) -> Element<'a, Message> {
+    text(label).size(theme::SMALL_SIZE).color(theme::TEXT_DIM).into()
+}
+
+fn dialog_buttons<'a, Message: Clone + 'a>(
+    accept_label: &'a str,
+    accept: Option<Message>,
+    cancel: Message,
+) -> Element<'a, Message> {
+    row![
+        space().width(Length::Fill),
+        button(text("Cancel").size(theme::UI_SIZE))
+            .padding([7, 14])
+            .style(theme::secondary)
+            .on_press(cancel),
+        button(text(accept_label).size(theme::UI_SIZE))
+            .padding([7, 16])
+            .style(theme::primary)
+            .on_press_maybe(accept),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn dialog_card<'a, Message: 'a>(
+    width: f32,
+    body: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    container(body).width(width).padding(22).style(theme::card).into()
 }
 
 // --------------------------------------------------------------- TagEditPopup
+
+#[derive(Debug, Clone)]
+pub enum PopupMessage {
+    Label(String),
+    Pattern(String),
+    ToggleIgnoreCase,
+    Highlight(bool),
+    Filter(bool),
+    Color(usize),
+    Accept,
+    Cancel,
+}
 
 pub enum PopupOutcome {
     Open,
@@ -149,8 +154,7 @@ pub enum PopupOutcome {
     Cancelled,
 }
 
-/// The new/edit tag dialog. The original placed every control at a hand-computed offset inside a
-/// 300x224 `FixedDialog`; here egui lays the same controls out vertically inside a modal window.
+/// The new/edit tag dialog.
 pub struct TagEditPopup {
     /// `None` for a new tag, otherwise the id of the tag being edited.
     pub editing: Option<Uuid>,
@@ -197,111 +201,135 @@ impl TagEditPopup {
         }
     }
 
-    pub fn show(&mut self, ctx: &Context) -> PopupOutcome {
-        let title = if self.editing.is_none() {
-            "New tag"
-        } else {
-            "Edit tag"
-        };
-
-        let matcher = Matcher::new(&self.pattern, true, self.ignore_case);
-        let error = matcher.error.clone().unwrap_or_default();
-        let can_accept = !matcher.is_empty() && matcher.is_valid();
-
-        let mut outcome = PopupOutcome::Open;
-        let mut open = true;
-
-        eframe::egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .default_width(300.0)
-            .show(ctx, |ui| {
-                ui.label("Label");
-                ui.add(
-                    eframe::egui::TextEdit::singleline(&mut self.label)
-                        .desired_width(f32::INFINITY),
-                );
-
-                ui.add_space(8.0);
-                ui.label("Pattern (regex)");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        eframe::egui::TextEdit::singleline(&mut self.pattern)
-                            .font(theme::mono(9.0))
-                            .desired_width(ui.available_width() - 48.0),
-                    );
-                    let rect = Rect::from_min_size(
-                        ui.cursor().min,
-                        vec2(40.0, 24.0),
-                    );
-                    ui.allocate_rect(rect, Sense::hover());
-                    crate::widgets::toggle_button(
-                        ui,
-                        rect,
-                        "Aa",
-                        theme::mono(9.0),
-                        &mut self.ignore_case,
-                        "Match case",
-                    );
-                });
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.highlight, "Highlight");
-                    ui.add_space(8.0);
-                    ui.checkbox(&mut self.filter, "Filter");
-                });
-
-                ui.add_space(8.0);
-                self.swatches(ui);
-
-                ui.add_space(6.0);
-                ui.colored_label(theme::ERROR, &error);
-
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(ui.available_width() - 150.0);
-                    if ui.button("Cancel").clicked() {
-                        outcome = PopupOutcome::Cancelled;
-                    }
-                    if ui
-                        .add_enabled(can_accept, eframe::egui::Button::new("OK"))
-                        .clicked()
-                    {
-                        outcome = PopupOutcome::Accepted;
-                    }
-                });
-            });
-
-        if !open {
-            return PopupOutcome::Cancelled;
-        }
-        if ctx.input(|i| i.key_pressed(eframe::egui::Key::Escape)) {
-            return PopupOutcome::Cancelled;
-        }
-        if can_accept && ctx.input(|i| i.key_pressed(eframe::egui::Key::Enter)) {
-            return PopupOutcome::Accepted;
-        }
-        outcome
+    fn matcher(&self) -> Matcher {
+        Matcher::new(&self.pattern, true, self.ignore_case)
     }
 
-    fn swatches(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            for (i, [r, g, b]) in TAG_PALETTE.iter().enumerate() {
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
-                let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 0.0, Color32::from_rgb(*r, *g, *b));
-                if i == self.color_index {
-                    theme::draw_round(&painter, theme::TEXT, rect, 0.0);
-                }
-                if response.clicked() {
-                    self.color_index = i;
-                }
-                ui.add_space(2.0);
-            }
-        });
+    fn can_accept(&self) -> bool {
+        let matcher = self.matcher();
+        !matcher.is_empty() && matcher.is_valid()
     }
+
+    pub fn update(&mut self, message: PopupMessage) -> PopupOutcome {
+        match message {
+            PopupMessage::Label(label) => self.label = label,
+            PopupMessage::Pattern(pattern) => self.pattern = pattern,
+            PopupMessage::ToggleIgnoreCase => self.ignore_case = !self.ignore_case,
+            PopupMessage::Highlight(on) => self.highlight = on,
+            PopupMessage::Filter(on) => self.filter = on,
+            PopupMessage::Color(index) => self.color_index = index,
+            PopupMessage::Accept if self.can_accept() => return PopupOutcome::Accepted,
+            PopupMessage::Accept => {}
+            PopupMessage::Cancel => return PopupOutcome::Cancelled,
+        }
+        PopupOutcome::Open
+    }
+
+    pub fn view(&self) -> Element<'_, PopupMessage> {
+        let title = if self.editing.is_none() { "New tag" } else { "Edit tag" };
+        let error = self.matcher().error.clone().unwrap_or_default();
+        let accept = self.can_accept().then_some(PopupMessage::Accept);
+
+        let label_input = text_input("Defaults to the pattern", &self.label)
+            .id(TAG_LABEL_INPUT)
+            .on_input(PopupMessage::Label)
+            .on_submit(PopupMessage::Accept)
+            .padding([8, 10])
+            .size(theme::UI_SIZE)
+            .style(theme::input);
+
+        let pattern_input = text_input("e.g. timeout|refused", &self.pattern)
+            .on_input(PopupMessage::Pattern)
+            .on_submit(PopupMessage::Accept)
+            .font(theme::MONO)
+            .padding([8, 10])
+            .size(theme::MONO_SIZE)
+            .style(theme::input);
+
+        let case_toggle = button(text("Aa").font(theme::MONO).size(theme::MONO_SIZE).center())
+            .width(36)
+            .height(34)
+            .style(theme::toggle(self.ignore_case))
+            .on_press(PopupMessage::ToggleIgnoreCase);
+
+        let swatches = row(TAG_PALETTE.iter().enumerate().map(|(i, [r, g, b])| {
+            button(space())
+                .width(22)
+                .height(22)
+                .style(theme::swatch(Color::from_rgb8(*r, *g, *b), i == self.color_index))
+                .on_press(PopupMessage::Color(i))
+                .into()
+        }))
+        .spacing(8);
+
+        let checkbox_row = row![
+            checkbox(self.highlight)
+                .label("Highlight")
+                .on_toggle(PopupMessage::Highlight)
+                .size(16)
+                .text_size(theme::UI_SIZE)
+                .style(theme::check),
+            checkbox(self.filter)
+                .label("Filter")
+                .on_toggle(PopupMessage::Filter)
+                .size(16)
+                .text_size(theme::UI_SIZE)
+                .style(theme::check),
+        ]
+        .spacing(24);
+
+        let body = column![
+            text(title).size(17),
+            column![field_label("Label"), label_input].spacing(6),
+            column![
+                field_label("Pattern (regex)"),
+                row![
+                    pattern_input,
+                    with_tip(case_toggle, "Ignore case", tooltip::Position::Top)
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+                text(error).size(theme::SMALL_SIZE).color(theme::ERROR),
+            ]
+            .spacing(6),
+            checkbox_row,
+            column![field_label("Colour"), swatches].spacing(8),
+            space().height(2),
+            dialog_buttons(
+                if self.editing.is_none() { "Add tag" } else { "Save" },
+                accept,
+                PopupMessage::Cancel,
+            ),
+        ]
+        .spacing(16);
+
+        dialog_card(400.0, body)
+    }
+}
+
+// ------------------------------------------------------------------ go to line
+
+#[derive(Debug, Clone)]
+pub enum GotoMessage {
+    Input(String),
+    Go,
+    Cancel,
+}
+
+pub fn goto_view(input: &str, line_count: usize) -> Element<'_, GotoMessage> {
+    let body = column![
+        text("Go to line").size(17),
+        text_input(&format!("1 – {}", crate::format::thousands(line_count as u64)), input)
+            .id(GOTO_INPUT)
+            .on_input(GotoMessage::Input)
+            .on_submit(GotoMessage::Go)
+            .font(theme::MONO)
+            .padding([8, 10])
+            .size(theme::MONO_SIZE)
+            .style(theme::input),
+        dialog_buttons("Go", Some(GotoMessage::Go), GotoMessage::Cancel),
+    ]
+    .spacing(16);
+
+    dialog_card(300.0, body)
 }
