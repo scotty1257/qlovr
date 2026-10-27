@@ -367,6 +367,15 @@ impl LogView {
         }
     }
 
+    /// The real file line at the top of the view, or -1 when there are no rows.
+    pub fn top_line(&self) -> i64 {
+        if self.mode == LogViewMode::Lines && self.top < self.display_count() {
+            self.actual_line(self.top)
+        } else {
+            -1
+        }
+    }
+
     /// The real file line shown on display row `display`.
     pub fn line_at(&self, display: usize) -> i64 {
         self.actual_line(display)

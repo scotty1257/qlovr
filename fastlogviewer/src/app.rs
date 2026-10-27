@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use fastlogviewer_core::{
     CancelToken, ComplementIndex, FilterIndex, IntersectionIndex, LogFile, LogTemplate,
@@ -49,6 +49,42 @@ const HINTS: [(&str, &str); 5] = [
     ("Ctrl M", "patterns"),
 ];
 
+/// How often the open file's size and modified time are compared with what was loaded.
+const DISK_CHECK: Duration = Duration::from_secs(2);
+/// How long a status-bar notice (a failed reload, a truncated copy) stays up.
+const NOTICE_FOR: Duration = Duration::from_secs(6);
+
+/// What `fs::metadata` said about the file when it was loaded; a difference means it changed.
+#[derive(PartialEq, Clone, Copy)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<FileStamp> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(FileStamp {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
+#[derive(PartialEq, Eq, Copy, Clone)]
+enum DiskState {
+    Unchanged,
+    Changed,
+    Missing,
+}
+
+/// Where the view was before a reload, by real line number, put back once the new index is done.
+#[derive(Copy, Clone)]
+struct Restore {
+    selected: i64,
+    top: i64,
+}
+
 /// Which index the ad-hoc/tag composition settled on, so the zoom layer can ask "is my base ready"
 /// the way the C# did by comparing object references.
 #[derive(PartialEq, Eq, Copy, Clone)]
@@ -72,6 +108,8 @@ pub enum Message {
     GoTop,
     GoBottom,
     OpenDialog,
+    Reload,
+    CheckDisk,
     NewTag,
     Chip(Uuid, ChipAction),
     Popup(PopupMessage),
@@ -97,6 +135,10 @@ pub struct App {
     file: Option<Arc<LogFile>>,
     file_ct: Option<CancelToken>,
     title: String,
+    file_stamp: Option<FileStamp>,
+    disk_state: DiskState,
+    pending_restore: Option<Restore>,
+    notice: Option<(String, Instant)>,
 
     search: String,
     regex_on: bool,
@@ -144,6 +186,10 @@ impl App {
             file: None,
             file_ct: None,
             title: "FastLogViewer".to_string(),
+            file_stamp: None,
+            disk_state: DiskState::Unchanged,
+            pending_restore: None,
+            notice: None,
             search: String::new(),
             regex_on: false,
             case_on: false,
@@ -202,6 +248,11 @@ impl App {
 
     pub fn load_file(&mut self, path: &str) {
         self.release_current();
+        self.pending_restore = None;
+        self.notice = None;
+        self.disk_state = DiskState::Unchanged;
+        // Taken before opening, so a write that lands in between shows as a change, not a miss.
+        self.file_stamp = FileStamp::of(Path::new(path));
 
         let file = match LogFile::open(path) {
             Ok(f) => Arc::new(f),
@@ -233,6 +284,65 @@ impl App {
         self.start_match_scan();
         self.view.set_active_filter(None);
         self.sync_tag_filters();
+    }
+
+    /// Re-opens the same file, keeping tags, the search, wrapping, and the selected and top lines.
+    /// Pattern results are dropped; the view goes back to lines.
+    fn reload(&mut self) {
+        let Some(file) = self.file.clone() else {
+            return;
+        };
+        let path = file.path().to_path_buf();
+        if !path.is_file() {
+            self.disk_state = DiskState::Missing;
+            self.notice = Some((
+                "Cannot reload: the file no longer exists".to_string(),
+                Instant::now(),
+            ));
+            return;
+        }
+
+        let restore = Restore {
+            selected: self.view.selected_actual_line(),
+            top: self.view.top_line(),
+        };
+        // In patterns, or zoomed into one, the search box holds a pattern or slot filter that
+        // means nothing to plain lines.
+        if self.view.mode() == LogViewMode::Templates || self.zoom.is_some() {
+            self.search.clear();
+        }
+        self.load_file(&path.to_string_lossy());
+        if self.file.is_some() {
+            self.pending_restore = Some(restore);
+        }
+    }
+
+    fn check_disk(&mut self) {
+        let Some(file) = &self.file else {
+            return;
+        };
+        self.disk_state = match FileStamp::of(file.path()) {
+            None => DiskState::Missing,
+            Some(stamp) if Some(stamp) == self.file_stamp => DiskState::Unchanged,
+            Some(_) => DiskState::Changed,
+        };
+    }
+
+    /// Puts the view back where it was before a reload, once the line index is complete.
+    fn apply_pending_restore(&mut self, file: &LogFile) {
+        let Some(restore) = self.pending_restore.take() else {
+            return;
+        };
+        let last = file.line_count() as i64 - 1;
+        if last < 0 {
+            return;
+        }
+        if restore.top >= 0 && !self.view.filter_on() {
+            self.view.scroll_to(restore.top.min(last));
+        }
+        if restore.selected >= 0 {
+            self.view.go_to_actual(restore.selected.min(last));
+        }
     }
 
     /// Cancels every worker and drops our handle on the mapping. Unlike the C#, nothing has to be
@@ -761,6 +871,7 @@ impl App {
         let mut left;
 
         if file.index_complete() {
+            self.apply_pending_restore(&file);
             left = format!(
                 "{} lines  ·  {}{}{}",
                 thousands(file.line_count() as u64),
@@ -1018,6 +1129,17 @@ impl App {
             Message::GoTop => self.view.go_to_start(),
             Message::GoBottom => self.view.go_to_end(),
             Message::OpenDialog => self.open_dialog(),
+            Message::Reload => self.reload(),
+            Message::CheckDisk => {
+                self.check_disk();
+                if self
+                    .notice
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed() >= NOTICE_FOR)
+                {
+                    self.notice = None;
+                }
+            }
             Message::NewTag => {
                 self.popup = Some(TagEditPopup::new_tag(
                     self.tag_store.tags.len() % TAG_PALETTE.len(),
@@ -1152,6 +1274,10 @@ impl App {
                 self.jump_match(if modifiers.shift() { -1 } else { 1 });
                 return Task::none();
             }
+            Key::Named(Named::F5) => {
+                self.reload();
+                return Task::none();
+            }
             // Escape inside the search box (it unfocuses itself): clear it, or step out when
             // there is nothing to clear — the C# `Search_KeyDown`.
             Key::Named(Named::Escape) if captured => {
@@ -1199,14 +1325,14 @@ impl App {
             _ => None,
         });
 
+        let mut subscriptions = vec![events];
         if self.busy || self.type_deadline.is_some() {
-            Subscription::batch([
-                events,
-                iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick),
-            ])
-        } else {
-            events
+            subscriptions.push(iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick));
         }
+        if self.file.is_some() {
+            subscriptions.push(iced::time::every(DISK_CHECK).map(|_| Message::CheckDisk));
+        }
+        Subscription::batch(subscriptions)
     }
 
     // -------------------------------------------------------------------- view
@@ -1273,8 +1399,13 @@ impl App {
                 tooltip::Position::Bottom,
             )
         };
+        let reload = jump(icons::RELOAD, Message::Reload, "Reload the file  (F5)");
         let top = jump(icons::TO_TOP, Message::GoTop, "Go to top  (Ctrl+Home)");
-        let bottom = jump(icons::TO_BOTTOM, Message::GoBottom, "Go to bottom  (Ctrl+End)");
+        let bottom = jump(
+            icons::TO_BOTTOM,
+            Message::GoBottom,
+            "Go to bottom  (Ctrl+End)",
+        );
 
         let placeholder = if self.view.mode() == LogViewMode::Templates {
             "Filter patterns…"
@@ -1413,8 +1544,31 @@ impl App {
             tooltip::Position::Bottom,
         );
 
+        let mut tools = row![open, reload].spacing(8).align_y(Alignment::Center);
+        if let Some((label, tip)) = match self.disk_state {
+            DiskState::Unchanged => None,
+            DiskState::Changed => Some((
+                "File changed",
+                "The file changed on disk. Click to reload  (F5)",
+            )),
+            DiskState::Missing => Some(("File missing", "The file was moved or deleted")),
+        } {
+            tools = tools.push(with_tip(
+                button(
+                    container(text(label).size(theme::SMALL_SIZE))
+                        .padding([3, 9])
+                        .style(theme::pill(theme::WARN)),
+                )
+                .padding(0)
+                .style(theme::ghost)
+                .on_press(Message::Reload),
+                tip,
+                tooltip::Position::Bottom,
+            ));
+        }
+
         container(
-            row![open, top, bottom, search, options, wrap, patterns]
+            row![tools, top, bottom, search, options, wrap, patterns]
                 .spacing(8)
                 .align_y(Alignment::Center),
         )
@@ -1520,10 +1674,20 @@ impl App {
                 .size(theme::SMALL_SIZE)
                 .color(theme::TEXT_DIM)
                 .wrapping(text::Wrapping::None),
-            space().width(Length::Fill),
         )
         .spacing(8)
         .align_y(Alignment::Center);
+        if let Some((notice, at)) = &self.notice {
+            if at.elapsed() < NOTICE_FOR {
+                bar = bar.push(
+                    text(notice)
+                        .size(theme::SMALL_SIZE)
+                        .color(theme::ERROR)
+                        .wrapping(text::Wrapping::None),
+                );
+            }
+        }
+        bar = bar.push(space().width(Length::Fill));
 
         for (keys, label) in HINTS {
             bar = bar.push(
