@@ -46,7 +46,7 @@ fn main() -> iced::Result {
     .subscription(app::App::subscription)
     .theme(|_: &app::App| theme::app_theme())
     .font(theme::JETBRAINS_MONO)
-    .font(theme::INTER)
+    .font(theme::IBM_PLEX)
     .default_font(theme::UI)
     .antialiasing(true)
     .window(settings)

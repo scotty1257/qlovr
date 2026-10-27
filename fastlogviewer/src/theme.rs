@@ -59,14 +59,14 @@ pub const INFO: Color = hex(0x58C4A8);
 pub const DEBUG: Color = hex(0x8A93A3);
 
 pub const MONO: Font = Font::with_name("JetBrains Mono");
-pub const UI: Font = Font::with_name("Inter");
+pub const UI: Font = Font::with_name("IBM Plex Sans");
 
 pub const MONO_SIZE: f32 = 13.0;
 pub const UI_SIZE: f32 = 13.0;
 pub const SMALL_SIZE: f32 = 12.0;
 
 pub const JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
-pub const INTER: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+pub const IBM_PLEX: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf");
 
 /// The base iced theme. Most widgets get an explicit style below; this only matters for the few
 /// defaults that leak through (text colour, selection, the window background).
