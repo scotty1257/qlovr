@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastlogviewer_core::{
-    copy_text_of, join_texts, FilterIndex, Joined, LogFile, LogTemplate, LogViewMode, MatchIndex,
-    Matcher, TagDef, MAX_LINE_BYTES,
+    copy_text_of, join_texts, ColumnShape, FilterIndex, Joined, LogFile, LogTemplate, LogViewMode,
+    MatchIndex, Matcher, TagDef, MAX_LINE_BYTES,
 };
 use iced::alignment::Vertical;
 use iced::keyboard::{self, key::Named, Key};
@@ -93,6 +93,9 @@ pub struct LogView {
     pub current_match_line: i64,
     tags: Vec<TagDef>,
 
+    /// Column layout lines are drawn in, when Columns is on and the file has one.
+    columns: Option<Arc<ColumnShape>>,
+
     /// Real lines with a line note.
     note_lines: HashSet<i64>,
     /// Patterns with a note; their lines get a pattern marker.
@@ -128,6 +131,7 @@ impl LogView {
             active_filter: None,
             current_match_line: -1,
             tags: Vec::new(),
+            columns: None,
             note_lines: HashSet::new(),
             note_patterns: Vec::new(),
             wrap_all: false,
@@ -152,7 +156,32 @@ impl LogView {
     }
 
     pub fn visible_rows(&self) -> usize {
-        ((self.viewport.get().height / ROW_H) as usize).max(1)
+        (((self.viewport.get().height - self.header_h()) / ROW_H) as usize).max(1)
+    }
+
+    pub fn set_columns(&mut self, columns: Option<Arc<ColumnShape>>) {
+        self.columns = columns;
+        self.scroll_cols_to(self.left_col as i64);
+        self.scroll_to(self.top as i64);
+    }
+
+    /// Height of the column header row: there is one only while columns are shown.
+    fn header_h(&self) -> f32 {
+        if self.columns.is_some() && self.mode == LogViewMode::Lines {
+            ROW_H
+        } else {
+            0.0
+        }
+    }
+
+    /// A line as drawn: laid out in columns when it fits the column layout, otherwise as is.
+    fn shown_text(&self, raw: String) -> String {
+        match &self.columns {
+            Some(columns) if self.mode == LogViewMode::Lines => columns
+                .render(raw.trim_end_matches(['\r', '\n']))
+                .unwrap_or(raw),
+            _ => raw,
+        }
     }
 
     fn visible_cols(&self) -> usize {
@@ -227,7 +256,10 @@ impl LogView {
             return 1;
         }
         let Some(file) = &self.file else { return 1 };
-        let chars = file.get_line(line as usize, MAX_LINE_BYTES).chars().count();
+        let chars = self
+            .shown_text(file.get_line(line as usize, MAX_LINE_BYTES))
+            .chars()
+            .count();
         chars.div_ceil(self.visible_cols()).max(1)
     }
 
@@ -386,7 +418,8 @@ impl LogView {
         let (a, b) = self.text_range()?;
         let file = self.file.clone()?;
         let pieces = (a.display..=b.display).map(move |display| {
-            let chars: Vec<char> = copy_text_of(&file, self.actual_line(display) as usize)
+            let chars: Vec<char> = self
+                .shown_text(copy_text_of(&file, self.actual_line(display) as usize))
                 .chars()
                 .collect();
             let from = if display == a.display { a.col } else { 0 }.min(chars.len());
@@ -661,9 +694,9 @@ impl LogView {
         let mut display = self.top;
         while display < count && row_lines.len() < screen_rows {
             let line = self.actual_line(display);
-            let full = file.get_line(line as usize, MAX_LINE_BYTES);
+            let full = self.shown_text(file.get_line(line as usize, MAX_LINE_BYTES));
             let chars: Vec<char> = full.chars().collect();
-            let y = row_lines.len() as f32 * ROW_H;
+            let y = self.header_h() + row_lines.len() as f32 * ROW_H;
             let is_current = line == self.current_match_line;
             let is_selected = line_sel.is_some_and(|(a, b)| (a..=b).contains(&display));
             let level = level_span(&full);
@@ -834,6 +867,45 @@ impl LogView {
                 }
             }
             display += 1;
+        }
+        drop(row_lines);
+        self.paint_column_header(frame);
+    }
+
+    /// The pinned row naming each column, scrolled sideways with the text.
+    fn paint_column_header(&self, frame: &mut Frame) {
+        let Some(columns) = self.columns.as_ref().filter(|_| self.header_h() > 0.0) else {
+            return;
+        };
+        let size = self.viewport.get();
+        let gutter_w = self.gutter_w();
+        frame.fill_rectangle(Point::ORIGIN, Size::new(size.width, ROW_H), theme::GUTTER);
+        frame.fill_rectangle(
+            Point::new(0.0, ROW_H - 1.0),
+            Size::new(size.width, 1.0),
+            theme::BORDER,
+        );
+        frame.fill_rectangle(
+            Point::new(gutter_w - 1.0, 0.0),
+            Size::new(1.0, ROW_H),
+            theme::BORDER,
+        );
+        for (header, offset) in columns.headers.iter().zip(columns.offsets()) {
+            if offset < self.left_col {
+                continue;
+            }
+            frame.fill_text(Text {
+                content: header.to_uppercase(),
+                position: Point::new(
+                    self.text_x() + (offset - self.left_col) as f32 * CHAR_W,
+                    ROW_H / 2.0,
+                ),
+                color: theme::TEXT_FAINT,
+                size: Pixels(theme::SMALL_SIZE),
+                font: theme::UI,
+                align_y: Vertical::Center,
+                ..Text::default()
+            });
         }
     }
 
@@ -1014,7 +1086,10 @@ impl LogView {
 
     /// The display row under `point`; `usize::MAX` below the last line.
     fn row_at(&self, point: Point) -> usize {
-        let screen_row = (point.y / ROW_H).max(0.0) as usize;
+        if point.y < self.header_h() {
+            return usize::MAX;
+        }
+        let screen_row = ((point.y - self.header_h()) / ROW_H).max(0.0) as usize;
         if self.mode == LogViewMode::Templates {
             return self.top + screen_row;
         }
@@ -1029,7 +1104,7 @@ impl LogView {
         }
         let row_lines = self.row_lines.borrow();
         let last = row_lines.len().checked_sub(1)?;
-        let screen_row = ((point.y / ROW_H).max(0.0) as usize).min(last);
+        let screen_row = (((point.y - self.header_h()) / ROW_H).max(0.0) as usize).min(last);
         let (display, piece) = row_lines[screen_row];
         let col = ((point.x - self.text_x()) / CHAR_W).round().max(0.0) as usize;
         let col = if self.is_wrapped(self.actual_line(display)) {

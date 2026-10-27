@@ -18,11 +18,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use fastlogviewer_core::{
-    bucket_counts, bucket_start, copy_text_of, intersection_count, join_lines, load_notes,
-    notes_path, parse_line_range, pin_line_notes, save_notes, CancelToken, ComplementIndex,
-    FilterIndex, IntersectionIndex, Joined, LineNote, LoadedNotes, LogFile, LogTemplate,
-    LogViewMode, MatchIndex, Matcher, NotesFile, PatternNote, PrefixShape, SlotFilterIndex,
-    SlotQuery, TagStore, TemplateIndex, UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
+    bucket_counts, bucket_start, copy_text_of, detect_columns, intersection_count, join_lines,
+    load_notes, notes_path, parse_line_range, pin_line_notes, save_notes, CancelToken,
+    ComplementIndex, FilterIndex, IntersectionIndex, Joined, LineNote, LoadedNotes, LogFile,
+    LogTemplate, LogViewMode, MatchIndex, Matcher, NotesFile, PatternNote, PrefixShape,
+    SlotFilterIndex, SlotQuery, TagStore, TemplateIndex, UnionFilterIndex, COPY_LIMIT_BYTES,
+    TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::scrollable::{Direction, Scrollbar};
@@ -165,6 +166,7 @@ pub enum Message {
     ToggleExclude,
     TogglePatterns,
     ToggleWrap,
+    ToggleColumns,
     GoTop,
     GoBottom,
     OpenDialog,
@@ -268,6 +270,11 @@ pub struct App {
     /// The last clustering covered the whole file, not just a filtered view of it.
     templates_whole_file: bool,
 
+    /// Columns is switched on; the layout is found once the line index is complete.
+    columns_wanted: bool,
+    /// Which file the column layout was found for, by address.
+    columns_for: usize,
+
     chrome_applied: bool,
 }
 
@@ -330,6 +337,8 @@ impl App {
             pattern_matches: Vec::new(),
             pattern_matches_from: 0,
             templates_whole_file: false,
+            columns_wanted: false,
+            columns_for: 0,
             chrome_applied: false,
         };
 
@@ -467,6 +476,8 @@ impl App {
         self.cancel_all_tag_filters();
         self.stop_stats();
         self.release_notes();
+        self.view.set_columns(None);
+        self.columns_for = 0;
         self.cancel_clustering();
         self.cancel_slot_filter();
         self.zoom = None;
@@ -1583,6 +1594,35 @@ impl App {
         .map(Message::Notes)
     }
 
+    // ---------------------------------------------------------------- columns
+
+    /// Lines sampled to find the column layout, spread evenly over the file.
+    const COLUMN_SAMPLE: usize = 2000;
+
+    /// Finds the column layout for a newly indexed file while Columns is on. Turns Columns back
+    /// off, with a notice, when the file has no layout.
+    fn sync_columns(&mut self, file: &Arc<LogFile>) {
+        let file_key = Arc::as_ptr(file) as usize;
+        if !self.columns_wanted || self.columns_for == file_key {
+            return;
+        }
+        self.columns_for = file_key;
+        let lines = file.line_count();
+        let step = lines.div_ceil(Self::COLUMN_SAMPLE).max(1);
+        let sample: Vec<String> = (0..lines)
+            .step_by(step)
+            .map(|line| copy_text_of(file, line))
+            .collect();
+        match detect_columns(&sample) {
+            Some(shape) => self.view.set_columns(Some(Arc::new(shape))),
+            None => {
+                self.columns_wanted = false;
+                self.view.set_columns(None);
+                self.notify("No column layout found in this file", true);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------- copy
 
     fn copy(&mut self, kind: CopyKind) -> Task<Message> {
@@ -1718,6 +1758,7 @@ impl App {
         let mut left;
 
         if file.index_complete() {
+            self.sync_columns(&file);
             self.apply_pending_restore(&file);
             left = format!(
                 "{} lines  ·  {}{}{}",
@@ -1976,6 +2017,13 @@ impl App {
             }
             Message::TogglePatterns => self.toggle_semantic_zoom(),
             Message::ToggleWrap => self.view.toggle_wrap_all(),
+            Message::ToggleColumns => {
+                self.columns_wanted = !self.columns_wanted;
+                self.columns_for = 0;
+                if !self.columns_wanted {
+                    self.view.set_columns(None);
+                }
+            }
             Message::GoTop => self.view.go_to_start(),
             Message::GoBottom => self.view.go_to_end(),
             Message::OpenDialog => self.open_dialog(),
@@ -2471,8 +2519,23 @@ impl App {
             ));
         }
 
+        let columns = with_tip(
+            button(
+                text("Columns")
+                    .size(theme::UI_SIZE)
+                    .height(Length::Fill)
+                    .align_y(Alignment::Center),
+            )
+            .height(34)
+            .padding([0, 12])
+            .style(theme::toggle(self.columns_wanted))
+            .on_press_maybe(has_file.then_some(Message::ToggleColumns)),
+            "Lay structured lines out in columns (time, level, …)\nLines that don't fit are shown as they are",
+            tooltip::Position::Bottom,
+        );
+
         container(
-            row![tools, top, bottom, copy, search, options, wrap, patterns]
+            row![tools, top, bottom, copy, search, options, wrap, columns, patterns]
                 .spacing(8)
                 .align_y(Alignment::Center),
         )
