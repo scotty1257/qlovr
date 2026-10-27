@@ -20,6 +20,7 @@
 mod app;
 mod format;
 mod log_view;
+mod notes_ui;
 mod stats_ui;
 mod tag_ui;
 mod theme;

@@ -18,6 +18,7 @@ pub mod line_numbers;
 pub mod log_file;
 pub mod match_index;
 pub mod matcher;
+pub mod notes;
 pub mod slot_filter;
 pub mod slot_query;
 pub mod stats;
@@ -31,6 +32,10 @@ pub use line_numbers::LineNumberList;
 pub use log_file::LogFile;
 pub use match_index::MatchIndex;
 pub use matcher::Matcher;
+pub use notes::{
+    load_notes, notes_path, pin_line_notes, save_notes, LineNote, LoadedNotes, NotesFile,
+    PatternNote,
+};
 pub use slot_filter::SlotFilterIndex;
 pub use slot_query::SlotQuery;
 pub use stats::{bucket_counts, bucket_start, intersection_count};

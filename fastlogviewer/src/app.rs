@@ -11,29 +11,31 @@
 //! Workers publish progress through atomics, not messages, so while anything is in flight a 50 ms
 //! tick re-reads them; the subscription drops the tick once everything has settled.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use fastlogviewer_core::{
-    bucket_counts, bucket_start, intersection_count, join_lines, parse_line_range, CancelToken,
-    ComplementIndex, FilterIndex, IntersectionIndex, Joined, LogFile, LogTemplate, LogViewMode,
-    MatchIndex, Matcher, PrefixShape, SlotFilterIndex, SlotQuery, TagStore, TemplateIndex,
-    UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
+    bucket_counts, bucket_start, copy_text_of, intersection_count, join_lines, load_notes,
+    notes_path, parse_line_range, pin_line_notes, save_notes, CancelToken, ComplementIndex,
+    FilterIndex, IntersectionIndex, Joined, LineNote, LoadedNotes, LogFile, LogTemplate,
+    LogViewMode, MatchIndex, Matcher, NotesFile, PatternNote, PrefixShape, SlotFilterIndex,
+    SlotQuery, TagStore, TemplateIndex, UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
     button, canvas, center, column, container, operation, row, scrollable, space, stack, svg, text,
-    text_input, tooltip, Id,
+    text_editor, text_input, tooltip, Id,
 };
 use iced::{event, window, Alignment, Color, Element, Event, Length, Padding, Subscription, Task};
 use uuid::Uuid;
 
 use crate::format::{thousands, thousands_1dp};
 use crate::log_view::{LogView, ViewMessage};
+use crate::notes_ui::{self, notes_panel, LineRow, NotesMessage, PatternRow};
 use crate::stats_ui::{stats_panel, StatsMessage, TagStat, STRIP_BUCKETS};
 use crate::tag_ui::{
     self, copy_view, goto_view, modal, tag_chip, with_tip, ChipAction, CopyChoices, CopyMessage,
@@ -102,6 +104,21 @@ enum CopyKind {
 #[derive(PartialEq, Eq, Copy, Clone)]
 enum SidePanel {
     Stats,
+    Notes,
+}
+
+/// Line notes being matched to the file's text on a worker; `None` until done.
+struct NotesPin {
+    result: Arc<Mutex<Option<Vec<Option<usize>>>>>,
+    ct: CancelToken,
+}
+
+/// What the notes panel's editors are open on.
+struct NoteFocus {
+    /// 0-based real line.
+    line: Option<i64>,
+    /// The pattern's text.
+    pattern: Option<String>,
 }
 
 /// A match scan the stats panel started for a tag that isn't filtering (filtering tags already
@@ -161,6 +178,8 @@ pub enum Message {
     Copy(CopyMessage),
     ToggleStats,
     Stats(StatsMessage),
+    ToggleNotes,
+    Notes(NotesMessage),
     View(ViewMessage),
     KeyPressed {
         key: Key,
@@ -233,6 +252,22 @@ pub struct App {
     /// The file's timestamp shape, sniffed once for the stats panel's first/last times.
     stats_prefix: Option<PrefixShape>,
 
+    notes: NotesFile,
+    /// Why notes can't be saved (the markup file belongs to another log), if they can't.
+    notes_read_only: Option<String>,
+    notes_pin: Option<NotesPin>,
+    /// The line notes have been matched to this file's text and can be shown and edited.
+    notes_placed: bool,
+    note_focus: Option<NoteFocus>,
+    line_editor: text_editor::Content,
+    pattern_editor: text_editor::Content,
+    /// The pattern each pattern note matched in the last finished clustering, in note order.
+    pattern_matches: Vec<Option<Arc<LogTemplate>>>,
+    /// Which clustering `pattern_matches` came from, by address.
+    pattern_matches_from: usize,
+    /// The last clustering covered the whole file, not just a filtered view of it.
+    templates_whole_file: bool,
+
     chrome_applied: bool,
 }
 
@@ -285,6 +320,16 @@ impl App {
             stats_scans: HashMap::new(),
             stats_shown: HashMap::new(),
             stats_prefix: None,
+            notes: NotesFile::for_log(Path::new("")),
+            notes_read_only: None,
+            notes_pin: None,
+            notes_placed: false,
+            note_focus: None,
+            line_editor: text_editor::Content::new(),
+            pattern_editor: text_editor::Content::new(),
+            pattern_matches: Vec::new(),
+            pattern_matches_from: 0,
+            templates_whole_file: false,
             chrome_applied: false,
         };
 
@@ -344,6 +389,7 @@ impl App {
         self.file_ct = Some(ct.clone());
         let indexing = file.clone();
         std::thread::spawn(move || indexing.build_index(&ct));
+        self.load_notes(&file);
 
         self.start_match_scan();
         self.view.set_active_filter(None);
@@ -420,6 +466,7 @@ impl App {
         self.cancel_match_scan();
         self.cancel_all_tag_filters();
         self.stop_stats();
+        self.release_notes();
         self.cancel_clustering();
         self.cancel_slot_filter();
         self.zoom = None;
@@ -706,6 +753,7 @@ impl App {
 
         // Cluster what the user is currently looking at, not always the whole file.
         let scope = self.current_scope_filter();
+        self.templates_whole_file = scope.is_none();
 
         let index = Arc::new(TemplateIndex::new(file.length() as i64));
         self.templates = Some(index.clone());
@@ -1118,6 +1166,423 @@ impl App {
         self.view.go_to_actual(line);
     }
 
+    // ------------------------------------------------------------------ notes
+
+    /// Reads the file's notes and starts matching the line notes to its text, which has to wait
+    /// for the line index.
+    fn load_notes(&mut self, file: &Arc<LogFile>) {
+        let path = file.path();
+        self.notes_read_only = None;
+        self.notes = match load_notes(path) {
+            LoadedNotes::Notes(notes) => notes,
+            LoadedNotes::Foreign => {
+                self.notes_read_only = Some(format!(
+                    "{} belongs to another log or can't be read, so notes won't be saved.",
+                    notes_path(path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                ));
+                NotesFile::for_log(path)
+            }
+        };
+        self.pattern_matches = vec![None; self.notes.pattern_notes.len()];
+        self.pattern_matches_from = 0;
+
+        if self.notes.line_notes.is_empty() {
+            self.notes_placed = true;
+            self.refresh_note_marks();
+            return;
+        }
+        let result = Arc::new(Mutex::new(None));
+        let ct = CancelToken::new();
+        let (worker_result, worker_ct, worker_file) = (result.clone(), ct.clone(), file.clone());
+        let notes = self.notes.line_notes.clone();
+        std::thread::spawn(move || {
+            while !worker_file.index_complete() {
+                if worker_ct.is_cancelled() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if let Some(pins) = pin_line_notes(&worker_file, &notes, &worker_ct) {
+                *worker_result.lock().unwrap() = Some(pins);
+            }
+        });
+        self.notes_pin = Some(NotesPin { result, ct });
+    }
+
+    fn release_notes(&mut self) {
+        if let Some(pin) = self.notes_pin.take() {
+            pin.ct.cancel();
+        }
+        self.notes = NotesFile::for_log(Path::new(""));
+        self.notes_read_only = None;
+        self.notes_placed = false;
+        self.note_focus = None;
+        self.pattern_matches.clear();
+        self.pattern_matches_from = 0;
+        self.view.set_note_marks(HashSet::new(), Vec::new());
+    }
+
+    /// Picks up the finished line-note matching and re-matches pattern notes when a clustering
+    /// finishes. Runs after every update.
+    fn sync_notes(&mut self) {
+        let pins = self
+            .notes_pin
+            .as_ref()
+            .and_then(|pin| pin.result.lock().unwrap().take());
+        if let Some(pins) = pins {
+            self.notes_pin = None;
+            let before = self.notes.line_notes.len();
+            let mut moved = false;
+            let mut kept = Vec::with_capacity(before);
+            for (mut note, pin) in self.notes.line_notes.drain(..).zip(pins) {
+                if let Some(line) = pin {
+                    moved |= note.line != line;
+                    note.line = line;
+                    kept.push(note);
+                }
+            }
+            self.notes.line_notes = kept;
+            self.notes_placed = true;
+            if moved || self.notes.line_notes.len() != before {
+                self.save_notes();
+            }
+            self.refresh_note_marks();
+        }
+
+        let finished = self.templates.clone().filter(|t| t.is_complete());
+        let from = finished.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize);
+        if from != self.pattern_matches_from {
+            self.pattern_matches_from = from;
+            self.match_pattern_notes();
+        }
+    }
+
+    /// Finds each pattern note's pattern in the last finished clustering. After a clustering of
+    /// the whole file, a pattern note that matched nothing is dropped; after a partial one it is
+    /// kept and listed as not matched.
+    fn match_pattern_notes(&mut self) {
+        let Some(index) = self.templates.clone().filter(|t| t.is_complete()) else {
+            self.pattern_matches = vec![None; self.notes.pattern_notes.len()];
+            self.refresh_note_marks();
+            return;
+        };
+        let all: Vec<(String, Arc<LogTemplate>)> = index
+            .snapshot_sorted()
+            .into_iter()
+            .map(|t| (t.render(), t))
+            .collect();
+        let find = |pattern: &str| {
+            all.iter()
+                .find(|(text, _)| text == pattern)
+                .map(|(_, t)| t.clone())
+        };
+        self.pattern_matches = self
+            .notes
+            .pattern_notes
+            .iter()
+            .map(|n| find(&n.pattern))
+            .collect();
+
+        if self.templates_whole_file && self.pattern_matches.iter().any(|m| m.is_none()) {
+            let matches = std::mem::take(&mut self.pattern_matches);
+            let mut notes = Vec::new();
+            for (note, found) in self.notes.pattern_notes.drain(..).zip(matches) {
+                if let Some(template) = found {
+                    notes.push(note);
+                    self.pattern_matches.push(Some(template));
+                }
+            }
+            self.notes.pattern_notes = notes;
+            self.save_notes();
+        }
+        self.refresh_note_marks();
+    }
+
+    fn save_notes(&mut self) {
+        if self.notes_read_only.is_some() {
+            return;
+        }
+        let Some(file) = self.file.clone() else {
+            return;
+        };
+        if let Err(e) = save_notes(file.path(), &self.notes) {
+            self.notify(format!("Couldn't save notes: {e}"), true);
+        }
+    }
+
+    fn refresh_note_marks(&mut self) {
+        let lines = if self.notes_placed {
+            self.notes
+                .line_notes
+                .iter()
+                .map(|n| n.line as i64)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let patterns = self.pattern_matches.iter().flatten().cloned().collect();
+        self.view.set_note_marks(lines, patterns);
+    }
+
+    /// The pattern a real line belongs to in the last finished clustering.
+    fn template_of_line(&self, line: i64) -> Option<Arc<LogTemplate>> {
+        let index = self.templates.as_ref().filter(|t| t.is_complete())?;
+        index.snapshot_sorted().into_iter().find(|t| {
+            let i = t.index_at_or_after(line as i32);
+            i < t.count() && t.get(i) as i64 == line
+        })
+    }
+
+    /// Opens the notes panel on a line: its note, and its pattern's note when patterns exist.
+    fn focus_note_line(&mut self, line: i64) {
+        let note = self
+            .notes
+            .line_notes
+            .iter()
+            .find(|n| n.line as i64 == line)
+            .map(|n| n.note.clone())
+            .unwrap_or_default();
+        self.line_editor = text_editor::Content::with_text(&note);
+        let pattern = self.template_of_line(line).map(|t| t.render());
+        self.set_pattern_editor(pattern.as_deref());
+        self.note_focus = Some(NoteFocus {
+            line: Some(line),
+            pattern,
+        });
+        self.side_panel = Some(SidePanel::Notes);
+    }
+
+    fn focus_note_pattern(&mut self, pattern: String) {
+        self.set_pattern_editor(Some(&pattern));
+        self.note_focus = Some(NoteFocus {
+            line: None,
+            pattern: Some(pattern),
+        });
+        self.side_panel = Some(SidePanel::Notes);
+    }
+
+    fn set_pattern_editor(&mut self, pattern: Option<&str>) {
+        let note = pattern
+            .and_then(|p| self.notes.pattern_notes.iter().find(|n| n.pattern == p))
+            .map(|n| n.note.clone())
+            .unwrap_or_default();
+        self.pattern_editor = text_editor::Content::with_text(&note);
+    }
+
+    /// Ctrl+Shift+N: a note for the selected line, or in the pattern list for the selected
+    /// pattern.
+    fn add_note_for_selection(&mut self) {
+        if self.view.mode() == LogViewMode::Templates {
+            let Some(template) = self.view.selected_template() else {
+                return;
+            };
+            if !self.templates.as_ref().is_some_and(|t| t.is_complete()) {
+                self.notify(
+                    "Patterns are still being found; add the note once they finish",
+                    true,
+                );
+                return;
+            }
+            self.focus_note_pattern(template.render());
+            return;
+        }
+        let line = self.view.selected_actual_line();
+        if line >= 0 {
+            self.focus_note_line(line);
+        }
+    }
+
+    /// The text of a note editor, without the trailing newline the editor keeps.
+    fn editor_text(content: &text_editor::Content) -> String {
+        content.text().trim_end_matches(['\r', '\n']).to_string()
+    }
+
+    fn edit_line_note(&mut self, action: text_editor::Action) {
+        let is_edit = action.is_edit();
+        self.line_editor.perform(action);
+        if !is_edit || !self.notes_placed {
+            return;
+        }
+        let (Some(file), Some(line)) = (
+            self.file.clone(),
+            self.note_focus.as_ref().and_then(|f| f.line),
+        ) else {
+            return;
+        };
+        let text = Self::editor_text(&self.line_editor);
+        let existing = self
+            .notes
+            .line_notes
+            .iter()
+            .position(|n| n.line as i64 == line);
+        match (existing, text.trim().is_empty()) {
+            (Some(i), true) => {
+                self.notes.line_notes.remove(i);
+            }
+            (Some(i), false) => {
+                let note = &mut self.notes.line_notes[i];
+                note.note = text;
+                note.updated = unix_now();
+            }
+            (None, true) => return,
+            (None, false) => self.notes.line_notes.push(LineNote {
+                text: copy_text_of(&file, line as usize),
+                line: line as usize,
+                note: text,
+                created: unix_now(),
+                updated: unix_now(),
+            }),
+        }
+        self.save_notes();
+        self.refresh_note_marks();
+    }
+
+    fn edit_pattern_note(&mut self, action: text_editor::Action) {
+        let is_edit = action.is_edit();
+        self.pattern_editor.perform(action);
+        let Some(pattern) = self.note_focus.as_ref().and_then(|f| f.pattern.clone()) else {
+            return;
+        };
+        if !is_edit {
+            return;
+        }
+        let text = Self::editor_text(&self.pattern_editor);
+        let existing = self
+            .notes
+            .pattern_notes
+            .iter()
+            .position(|n| n.pattern == pattern);
+        match (existing, text.trim().is_empty()) {
+            (Some(i), true) => {
+                self.notes.pattern_notes.remove(i);
+                self.pattern_matches.remove(i);
+            }
+            (Some(i), false) => {
+                let note = &mut self.notes.pattern_notes[i];
+                note.note = text;
+                note.updated = unix_now();
+            }
+            (None, true) => return,
+            (None, false) => {
+                self.notes.pattern_notes.push(PatternNote {
+                    pattern: pattern.clone(),
+                    note: text,
+                    created: unix_now(),
+                    updated: unix_now(),
+                });
+                let found = self
+                    .templates
+                    .as_ref()
+                    .filter(|t| t.is_complete())
+                    .and_then(|t| {
+                        t.snapshot_sorted()
+                            .into_iter()
+                            .find(|t| t.render() == pattern)
+                    });
+                self.pattern_matches.push(found);
+            }
+        }
+        self.save_notes();
+        self.refresh_note_marks();
+    }
+
+    fn apply_notes_message(&mut self, message: NotesMessage) {
+        match message {
+            NotesMessage::Close => self.side_panel = None,
+            NotesMessage::EditLine(action) => self.edit_line_note(action),
+            NotesMessage::EditPattern(action) => self.edit_pattern_note(action),
+            NotesMessage::JumpToLine(line) => {
+                self.go_to_line_in_lines(line);
+                self.focus_note_line(line);
+            }
+            NotesMessage::FocusPattern(i) => {
+                if let Some(note) = self.notes.pattern_notes.get(i) {
+                    self.focus_note_pattern(note.pattern.clone());
+                }
+            }
+            NotesMessage::DeleteLine(i) => {
+                let mut order: Vec<usize> = (0..self.notes.line_notes.len()).collect();
+                order.sort_by_key(|&n| self.notes.line_notes[n].line);
+                let Some(&index) = order.get(i) else {
+                    return;
+                };
+                let removed = self.notes.line_notes.remove(index);
+                if self.note_focus.as_ref().and_then(|f| f.line) == Some(removed.line as i64) {
+                    self.line_editor = text_editor::Content::new();
+                }
+                self.save_notes();
+                self.refresh_note_marks();
+            }
+            NotesMessage::DeletePattern(i) => {
+                if i >= self.notes.pattern_notes.len() {
+                    return;
+                }
+                let removed = self.notes.pattern_notes.remove(i);
+                self.pattern_matches.remove(i);
+                if self.note_focus.as_ref().and_then(|f| f.pattern.as_deref())
+                    == Some(removed.pattern.as_str())
+                {
+                    self.pattern_editor = text_editor::Content::new();
+                }
+                self.save_notes();
+                self.refresh_note_marks();
+            }
+        }
+    }
+
+    fn notes_view(&self) -> Element<'_, Message> {
+        let focus = self.note_focus.as_ref().map(|focus| notes_ui::Focus {
+            line: focus.line.and_then(|line| {
+                let file = self.file.as_ref()?;
+                Some((line, file.get_line(line as usize, 512)))
+            }),
+            line_editor: &self.line_editor,
+            pattern: focus.pattern.clone(),
+            pattern_editor: &self.pattern_editor,
+        });
+
+        let mut lines: Vec<LineRow> = self
+            .notes
+            .line_notes
+            .iter()
+            .map(|n| LineRow {
+                line: n.line,
+                note: n.note.clone(),
+            })
+            .collect();
+        // Same order `DeleteLine` indexes by.
+        lines.sort_by_key(|row| row.line);
+
+        let clustered = self.templates.as_ref().is_some_and(|t| t.is_complete());
+        let patterns = self
+            .notes
+            .pattern_notes
+            .iter()
+            .zip(&self.pattern_matches)
+            .map(|(n, found)| PatternRow {
+                pattern: n.pattern.clone(),
+                note: n.note.clone(),
+                status: match (found, clustered) {
+                    (Some(_), _) => None,
+                    (None, true) => Some("not matched in this run"),
+                    (None, false) => Some("run Patterns to show"),
+                },
+            })
+            .collect();
+
+        notes_panel(notes_ui::Panel {
+            focus,
+            lines: if self.notes_placed { lines } else { Vec::new() },
+            patterns,
+            placing: !self.notes_placed,
+            read_only: self.notes_read_only.clone(),
+        })
+        .map(Message::Notes)
+    }
+
     // ------------------------------------------------------------------- copy
 
     fn copy(&mut self, kind: CopyKind) -> Task<Message> {
@@ -1471,7 +1936,8 @@ impl App {
         let task = self.apply(message);
         self.refresh_status();
         self.sync_stats();
-        self.busy |= self.stats_busy();
+        self.sync_notes();
+        self.busy |= self.stats_busy() || self.notes_pin.is_some();
         task
     }
 
@@ -1565,6 +2031,13 @@ impl App {
                 };
             }
             Message::Stats(message) => self.apply_stats_message(message),
+            Message::ToggleNotes => {
+                self.side_panel = match self.side_panel {
+                    Some(SidePanel::Notes) => None,
+                    _ => Some(SidePanel::Notes),
+                };
+            }
+            Message::Notes(message) => self.apply_notes_message(message),
             Message::OpenCopy => return self.open_copy_dialog(),
             Message::Copy(message) => return self.apply_copy_message(message),
             Message::View(message) => match message {
@@ -1577,6 +2050,10 @@ impl App {
                 }
                 ViewMessage::Select(row) => self.view.select(row),
                 ViewMessage::DragText(from, to) => self.view.set_text_selection(from, to),
+                ViewMessage::NoteMarker(row) => {
+                    self.view.select(row);
+                    self.focus_note_line(self.view.line_at(row));
+                }
                 ViewMessage::Activate(row) => {
                     self.view.select(row);
                     if self.view.mode() == LogViewMode::Templates {
@@ -1637,6 +2114,10 @@ impl App {
             if let Key::Character(c) = &key {
                 match c.to_lowercase().as_str() {
                     "c" if modifiers.shift() => return self.open_copy_dialog(),
+                    "n" if modifiers.shift() => {
+                        self.add_note_for_selection();
+                        return Task::none();
+                    }
                     "o" => {
                         self.open_dialog();
                         return Task::none();
@@ -1759,6 +2240,9 @@ impl App {
                 stats_panel(self.tag_stats(), self.view.filter_on()).map(Message::Stats),
             ]
             .into(),
+            Some(SidePanel::Notes) if self.file.is_some() => {
+                row![surface, vertical_rule(), self.notes_view()].into()
+            }
             _ => surface.into(),
         };
         let layout = layout.push(body).push(rule()).push(self.status_bar());
@@ -2031,6 +2515,23 @@ impl App {
             "How often each tag matches, and where in the file",
             tooltip::Position::Bottom,
         ));
+        let notes_on = self.side_panel == Some(SidePanel::Notes);
+        let note_count = self.notes.line_notes.len() + self.notes.pattern_notes.len();
+        chips = chips.push(with_tip(
+            button(
+                text(if note_count > 0 {
+                    format!("Notes ({note_count})")
+                } else {
+                    "Notes".to_string()
+                })
+                .size(theme::SMALL_SIZE),
+            )
+            .padding([4, 10])
+            .style(theme::toggle(notes_on))
+            .on_press_maybe(self.file.is_some().then_some(Message::ToggleNotes)),
+            "Notes on lines and patterns  (Ctrl+Shift+N adds one)",
+            tooltip::Position::Bottom,
+        ));
 
         container(scrollable(chips).direction(Direction::Horizontal(
             Scrollbar::new().width(0).scroller_width(0),
@@ -2192,6 +2693,12 @@ fn vertical_rule<'a>() -> Element<'a, Message> {
         .height(Length::Fill)
         .style(theme::divider)
         .into()
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn percent(part: usize, whole: usize) -> f64 {

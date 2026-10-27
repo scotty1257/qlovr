@@ -19,7 +19,7 @@ use fastlogviewer_core::{
 use iced::alignment::Vertical;
 use iced::keyboard::{self, key::Named, Key};
 use iced::mouse;
-use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Text};
+use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::text::{Alignment, Shaping};
 use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
@@ -50,7 +50,12 @@ pub enum ViewMessage {
     Activate(usize),
     /// A press-and-drag over text: where it started and where the pointer is now.
     DragText(TextPos, TextPos),
+    /// A click on a row's note marker, or on the "+" that adds one.
+    NoteMarker(usize),
 }
+
+/// Width of the strip at the gutter's left edge where note markers sit.
+const MARKER_W: f32 = 18.0;
 
 /// A character position: display row and char column within that row's line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -88,6 +93,11 @@ pub struct LogView {
     pub current_match_line: i64,
     tags: Vec<TagDef>,
 
+    /// Real lines with a line note.
+    note_lines: HashSet<i64>,
+    /// Patterns with a note; their lines get a pattern marker.
+    note_patterns: Vec<Arc<LogTemplate>>,
+
     /// Wrap every line to the view's width.
     wrap_all: bool,
     /// Real line numbers wrapped one at a time (Enter or double-click).
@@ -118,6 +128,8 @@ impl LogView {
             active_filter: None,
             current_match_line: -1,
             tags: Vec::new(),
+            note_lines: HashSet::new(),
+            note_patterns: Vec::new(),
             wrap_all: false,
             wrapped: HashSet::new(),
             viewport: Cell::new(Size::ZERO),
@@ -242,6 +254,20 @@ impl LogView {
 
     pub fn set_tags(&mut self, tags: Vec<TagDef>) {
         self.tags = tags;
+    }
+
+    pub fn set_note_marks(&mut self, lines: HashSet<i64>, patterns: Vec<Arc<LogTemplate>>) {
+        self.note_lines = lines;
+        self.note_patterns = patterns;
+    }
+
+    /// Whether a real line has a line note and whether it belongs to a pattern with a note.
+    fn note_marks(&self, line: i64) -> (bool, bool) {
+        let in_pattern = self.note_patterns.iter().any(|t| {
+            let i = t.index_at_or_after(line as i32);
+            i < t.count() && t.get(i) as i64 == line
+        });
+        (self.note_lines.contains(&line), in_pattern)
     }
 
     pub fn set_active_filter(&mut self, filter: Option<Arc<dyn FilterIndex>>) {
@@ -674,6 +700,34 @@ impl LogView {
             }
             if is_selected {
                 frame.fill_rectangle(Point::new(gutter_w, y), Size::new(2.0, height), theme::ACCENT);
+            }
+
+            // Notes: a dot for a line note, a ring for a pattern note, a faint "+" on hover to
+            // add one.
+            let (line_note, pattern_note) = self.note_marks(line);
+            let center = Point::new(MARKER_W / 2.0 + 1.0, y + ROW_H / 2.0);
+            if line_note {
+                frame.fill(&Path::circle(center, 3.5), theme::ACCENT);
+            }
+            if pattern_note {
+                let radius = if line_note { 6.0 } else { 4.0 };
+                frame.stroke(
+                    &Path::circle(center, radius),
+                    Stroke::default().with_color(theme::WARN).with_width(1.5),
+                );
+            }
+            if !line_note && !pattern_note && hover_row == Some(display) {
+                frame.fill_text(Text {
+                    content: "+".to_string(),
+                    position: center,
+                    color: theme::TEXT_FAINT,
+                    size: Pixels(theme::MONO_SIZE),
+                    font: theme::MONO,
+                    align_x: Alignment::Center,
+                    align_y: Vertical::Center,
+                    shaping: Shaping::Basic,
+                    ..Text::default()
+                });
             }
 
             frame.fill_text(Text {
@@ -1143,6 +1197,10 @@ impl canvas::Program<ViewMessage> for LogView {
                 if row >= count {
                     return None;
                 }
+                if self.mode == LogViewMode::Lines && p.x < MARKER_W {
+                    state.press = None;
+                    return Some(Action::publish(ViewMessage::NoteMarker(row)).and_capture());
+                }
                 let now = Instant::now();
                 let double = state
                     .last_click
@@ -1267,6 +1325,12 @@ impl canvas::Program<ViewMessage> for LogView {
             return mouse::Interaction::Grabbing;
         }
         let size = self.viewport.get();
+        let over_marker = cursor
+            .position_in(bounds)
+            .is_some_and(|p| p.x < MARKER_W && self.row_at(p) < self.display_count());
+        if self.mode == LogViewMode::Lines && over_marker && state.press.is_none() {
+            return mouse::Interaction::Pointer;
+        }
         let over_text = cursor.position_in(bounds).is_some_and(|p| {
             p.x >= self.text_x() && p.x < size.width && p.y < size.height
         });
