@@ -17,14 +17,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastlogviewer_core::{
-    CancelToken, ComplementIndex, FilterIndex, IntersectionIndex, LogFile, LogTemplate, LogViewMode, MatchIndex,
-    Matcher, SlotFilterIndex, SlotQuery, TagStore, TemplateIndex, UnionFilterIndex, TAG_PALETTE,
+    CancelToken, ComplementIndex, FilterIndex, IntersectionIndex, LogFile, LogTemplate,
+    LogViewMode, MatchIndex, Matcher, SlotFilterIndex, SlotQuery, TagStore, TemplateIndex,
+    UnionFilterIndex, TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    button, canvas, center, column, container, operation, row, scrollable, space, stack, svg,
-    text, text_input, tooltip, Id,
+    button, canvas, center, column, container, operation, row, scrollable, space, stack, svg, text,
+    text_input, tooltip, Id,
 };
 use iced::{event, window, Alignment, Color, Element, Event, Length, Padding, Subscription, Task};
 use uuid::Uuid;
@@ -277,7 +278,9 @@ impl App {
         }
 
         self.cancel_match_scan();
-        let Some(file) = self.file.clone() else { return };
+        let Some(file) = self.file.clone() else {
+            return;
+        };
 
         let matcher = Arc::new(Matcher::new(&self.search, self.regex_on, self.case_on));
         self.matcher = Some(matcher.clone());
@@ -319,8 +322,12 @@ impl App {
     /// rebuilding the union if that changed anything.
     fn sync_tag_filters(&mut self) {
         let wanted = self.tag_store.filtering_ids();
-        let stale: Vec<Uuid> =
-            self.tag_indexes.keys().filter(|id| !wanted.contains(id)).copied().collect();
+        let stale: Vec<Uuid> = self
+            .tag_indexes
+            .keys()
+            .filter(|id| !wanted.contains(id))
+            .copied()
+            .collect();
         let mut changed = !stale.is_empty();
         for id in stale {
             self.stop_tag_filter(id);
@@ -337,7 +344,9 @@ impl App {
 
     /// Starts scanning for one tag's matches. Returns whether it started.
     fn start_tag_index(&mut self, id: Uuid) -> bool {
-        let Some(file) = self.file.clone() else { return false };
+        let Some(file) = self.file.clone() else {
+            return false;
+        };
         let Some(matcher) = self
             .tag_store
             .tags
@@ -509,7 +518,9 @@ impl App {
 
     fn start_clustering(&mut self) {
         self.cancel_clustering();
-        let Some(file) = self.file.clone() else { return };
+        let Some(file) = self.file.clone() else {
+            return;
+        };
 
         // Cluster what the user is currently looking at, not always the whole file.
         let scope = self.current_scope_filter();
@@ -681,7 +692,11 @@ impl App {
                 i
             }
         } else {
-            let from = if current < 0 { i32::MAX } else { current as i32 };
+            let from = if current < 0 {
+                i32::MAX
+            } else {
+                current as i32
+            };
             let i = matches.index_at_or_after(from);
             if i == 0 {
                 matches.count() - 1 // wrap
@@ -921,8 +936,12 @@ impl App {
 
     /// Moves the tag open in the editor one place left or right, which is how levels are ranked.
     fn move_tag(&mut self, delta: i64) {
-        let Some(id) = self.popup.as_ref().and_then(|p| p.editing) else { return };
-        let Some(index) = self.tag_store.tags.iter().position(|t| t.id == id) else { return };
+        let Some(id) = self.popup.as_ref().and_then(|p| p.editing) else {
+            return;
+        };
+        let Some(index) = self.tag_store.tags.iter().position(|t| t.id == id) else {
+            return;
+        };
         if self.tag_store.move_tag(index, delta).is_some() {
             self.tag_store.save();
             self.sync_tag_filters();
@@ -1180,7 +1199,11 @@ impl App {
             layout = layout.push(crumb).push(rule());
         }
         let layout = layout
-            .push(container(surface).height(Length::Fill).style(theme::log_surface))
+            .push(
+                container(surface)
+                    .height(Length::Fill)
+                    .style(theme::log_surface),
+            )
             .push(rule())
             .push(self.status_bar());
 
@@ -1193,7 +1216,11 @@ impl App {
             stack![base, modal(popup.view().map(Message::Popup))].into()
         } else if self.goto_open {
             let lines = self.file.as_ref().map_or(0, |f| f.line_count());
-            stack![base, modal(goto_view(&self.goto_text, lines).map(Message::Goto))].into()
+            stack![
+                base,
+                modal(goto_view(&self.goto_text, lines).map(Message::Goto))
+            ]
+            .into()
         } else {
             base.into()
         }
@@ -1235,7 +1262,11 @@ impl App {
             .style(theme::input);
         let count = text(&self.count_text)
             .size(theme::SMALL_SIZE)
-            .color(if self.count_error { theme::ERROR } else { theme::TEXT_DIM });
+            .color(if self.count_error {
+                theme::ERROR
+            } else {
+                theme::TEXT_DIM
+            });
         let search = stack![
             input,
             container(icon(icons::SEARCH, 15.0, theme::TEXT_FAINT))
@@ -1251,25 +1282,36 @@ impl App {
         ]
         .width(Length::Fill);
 
-        let toggle = |label: &'static str, mono: bool, on: bool, message: Message, tip: &'static str| {
-            let label = text(label)
-                .size(if mono { theme::MONO_SIZE } else { theme::UI_SIZE })
-                .font(if mono { theme::MONO } else { theme::UI })
-                .height(Length::Fill)
-                .align_y(Alignment::Center);
-            with_tip(
-                button(label)
-                    .height(30)
-                    .padding([0, 10])
-                    .style(theme::toggle(on))
-                    .on_press(message),
-                tip,
-                tooltip::Position::Bottom,
-            )
-        };
+        let toggle =
+            |label: &'static str, mono: bool, on: bool, message: Message, tip: &'static str| {
+                let label = text(label)
+                    .size(if mono {
+                        theme::MONO_SIZE
+                    } else {
+                        theme::UI_SIZE
+                    })
+                    .font(if mono { theme::MONO } else { theme::UI })
+                    .height(Length::Fill)
+                    .align_y(Alignment::Center);
+                with_tip(
+                    button(label)
+                        .height(30)
+                        .padding([0, 10])
+                        .style(theme::toggle(on))
+                        .on_press(message),
+                    tip,
+                    tooltip::Position::Bottom,
+                )
+            };
         let options = container(
             row![
-                toggle(".*", true, self.regex_on, Message::ToggleRegex, "Regular expression"),
+                toggle(
+                    ".*",
+                    true,
+                    self.regex_on,
+                    Message::ToggleRegex,
+                    "Regular expression"
+                ),
                 toggle("Aa", true, self.case_on, Message::ToggleCase, "Match case"),
                 toggle(
                     "Filter",
@@ -1298,7 +1340,11 @@ impl App {
                     icon(
                         icons::LAYERS,
                         14.0,
-                        if patterns_on { theme::ACCENT } else { theme::TEXT_DIM }
+                        if patterns_on {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_DIM
+                        }
                     ),
                     text("Patterns").size(theme::UI_SIZE),
                 ]
@@ -1365,10 +1411,9 @@ impl App {
             tooltip::Position::Bottom,
         ));
 
-        container(
-            scrollable(chips)
-                .direction(Direction::Horizontal(Scrollbar::new().width(0).scroller_width(0))),
-        )
+        container(scrollable(chips).direction(Direction::Horizontal(
+            Scrollbar::new().width(0).scroller_width(0),
+        )))
         // Fixed, so adding the first chip (a touch taller than the button) doesn't nudge the log.
         .height(42)
         .align_y(Alignment::Center)
@@ -1390,9 +1435,12 @@ impl App {
             let count = self.templates.as_ref().map_or(0, |t| t.template_count());
             row![
                 pill("PATTERNS"),
-                text(format!("{} patterns, most frequent first", thousands(count as u64)))
-                    .size(theme::SMALL_SIZE)
-                    .color(theme::TEXT_DIM),
+                text(format!(
+                    "{} patterns, most frequent first",
+                    thousands(count as u64)
+                ))
+                .size(theme::SMALL_SIZE)
+                .color(theme::TEXT_DIM),
                 space().width(Length::Fill),
                 hint("↑↓ select  ·  Enter show lines  ·  Esc back"),
             ]
@@ -1428,14 +1476,14 @@ impl App {
             theme::TEXT_FAINT
         };
 
-        let mut bar = row![
+        let mut bar = row!(
             container(space()).width(7).height(7).style(theme::dot(dot)),
             text(&self.status_left)
                 .size(theme::SMALL_SIZE)
                 .color(theme::TEXT_DIM)
                 .wrapping(text::Wrapping::None),
             space().width(Length::Fill),
-        ]
+        )
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -1483,7 +1531,9 @@ impl App {
                 .padding([8, 16])
                 .style(theme::primary)
                 .on_press(Message::OpenDialog),
-                text("or press Ctrl+O").size(theme::SMALL_SIZE).color(theme::TEXT_FAINT),
+                text("or press Ctrl+O")
+                    .size(theme::SMALL_SIZE)
+                    .color(theme::TEXT_FAINT),
             ]
             .spacing(10)
             .align_x(Alignment::Center),

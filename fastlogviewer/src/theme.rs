@@ -255,9 +255,11 @@ pub fn primary(_: &Theme, status: button::Status) -> button::Style {
         button::Status::Hovered | button::Status::Pressed => {
             button_style(hex(0x78AEFF), ON_ACCENT, hex(0x78AEFF))
         }
-        button::Status::Disabled => {
-            button_style(alpha(ACCENT, 0.25), alpha(ON_ACCENT, 0.6), alpha(ACCENT, 0.0))
-        }
+        button::Status::Disabled => button_style(
+            alpha(ACCENT, 0.25),
+            alpha(ON_ACCENT, 0.6),
+            alpha(ACCENT, 0.0),
+        ),
         button::Status::Active => button_style(ACCENT, ON_ACCENT, ACCENT),
     }
 }
