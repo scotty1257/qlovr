@@ -335,6 +335,43 @@ impl LogView {
         self.go_to_display(display);
     }
 
+    /// Selects the first row and scrolls to it (Ctrl+Home, or the toolbar's Top button).
+    pub fn go_to_start(&mut self) {
+        if self.mode == LogViewMode::Templates {
+            self.move_template_selection(i64::MIN / 2);
+        } else {
+            self.go_to_display(0);
+        }
+    }
+
+    /// Selects the last row and scrolls to it (Ctrl+End, or the toolbar's Bottom button).
+    pub fn go_to_end(&mut self) {
+        if self.mode == LogViewMode::Templates {
+            self.move_template_selection(i64::MAX / 2);
+        } else {
+            self.go_to_display(self.display_count() as i64 - 1);
+        }
+    }
+
+    /// The display row the status bar reports: the selection, or the top row when nothing is
+    /// selected. `None` when there are no rows.
+    pub fn current_display(&self) -> Option<usize> {
+        let count = self.display_count();
+        if count == 0 {
+            return None;
+        }
+        if self.selected >= 0 && (self.selected as usize) < count {
+            Some(self.selected as usize)
+        } else {
+            Some(self.top.min(count - 1))
+        }
+    }
+
+    /// The real file line shown on display row `display`.
+    pub fn line_at(&self, display: usize) -> i64 {
+        self.actual_line(display)
+    }
+
     pub fn select(&mut self, display: usize) {
         if display < self.display_count() {
             self.selected = display as i64;
@@ -407,9 +444,9 @@ impl LogView {
             Key::Named(Named::PageDown) => self.scroll_by(rows),
             Key::Named(Named::ArrowLeft) => self.scroll_cols_to(self.left_col as i64 - 8),
             Key::Named(Named::ArrowRight) => self.scroll_cols_to(self.left_col as i64 + 8),
-            Key::Named(Named::Home) if ctrl => self.scroll_to(0),
+            Key::Named(Named::Home) if ctrl => self.go_to_start(),
             Key::Named(Named::Home) => self.left_col = 0,
-            Key::Named(Named::End) if ctrl => self.scroll_to(self.display_count() as i64),
+            Key::Named(Named::End) if ctrl => self.go_to_end(),
             Key::Named(Named::End) => self.scroll_cols_to(i64::MAX),
             Key::Named(Named::Enter) if self.selected >= 0 => {
                 self.toggle_wrap_line(self.selected as usize)

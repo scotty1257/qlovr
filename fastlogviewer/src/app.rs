@@ -69,6 +69,8 @@ pub enum Message {
     ToggleExclude,
     TogglePatterns,
     ToggleWrap,
+    GoTop,
+    GoBottom,
     OpenDialog,
     NewTag,
     Chip(Uuid, ChipAction),
@@ -722,6 +724,32 @@ impl App {
 
     // ----------------------------------------------------------------- status
 
+    /// "  ·  line N of M (P%)" for the selected row, or the top row when nothing is selected.
+    /// Filtered, N and M count displayed rows and the real line number follows.
+    fn position_text(&self) -> String {
+        let Some(display) = self.view.current_display() else {
+            return String::new();
+        };
+        let count = self.view.display_count();
+        let pct = 100.0 * (display + 1) as f64 / count as f64;
+        if self.view.filter_on() {
+            format!(
+                "  ·  row {} of {} ({:.0}%)  ·  line {}",
+                thousands(display as u64 + 1),
+                thousands(count as u64),
+                pct,
+                thousands(self.view.line_at(display) as u64 + 1)
+            )
+        } else {
+            format!(
+                "  ·  line {} of {} ({:.0}%)",
+                thousands(display as u64 + 1),
+                thousands(count as u64),
+                pct
+            )
+        }
+    }
+
     fn refresh_status(&mut self) {
         let Some(file) = self.file.clone() else {
             self.busy = false;
@@ -733,16 +761,11 @@ impl App {
         let mut left;
 
         if file.index_complete() {
-            let sel = self.view.selected_actual_line();
             left = format!(
                 "{} lines  ·  {}{}{}",
                 thousands(file.line_count() as u64),
                 size,
-                if sel >= 0 {
-                    format!("  ·  line {}", thousands(sel as u64 + 1))
-                } else {
-                    String::new()
-                },
+                self.position_text(),
                 if self.view.filter_on() {
                     "  ·  filtered"
                 } else {
@@ -992,6 +1015,8 @@ impl App {
             }
             Message::TogglePatterns => self.toggle_semantic_zoom(),
             Message::ToggleWrap => self.view.toggle_wrap_all(),
+            Message::GoTop => self.view.go_to_start(),
+            Message::GoBottom => self.view.go_to_end(),
             Message::OpenDialog => self.open_dialog(),
             Message::NewTag => {
                 self.popup = Some(TagEditPopup::new_tag(
@@ -1238,6 +1263,19 @@ impl App {
             tooltip::Position::Bottom,
         );
 
+        let jump = |bytes: &'static [u8], message: Message, tip: &'static str| {
+            with_tip(
+                button(icon(bytes, 16.0, theme::TEXT_DIM))
+                    .padding(8)
+                    .style(theme::ghost)
+                    .on_press_maybe(has_file.then_some(message)),
+                tip,
+                tooltip::Position::Bottom,
+            )
+        };
+        let top = jump(icons::TO_TOP, Message::GoTop, "Go to top  (Ctrl+Home)");
+        let bottom = jump(icons::TO_BOTTOM, Message::GoBottom, "Go to bottom  (Ctrl+End)");
+
         let placeholder = if self.view.mode() == LogViewMode::Templates {
             "Filter patterns…"
         } else if self.zoom.is_some() {
@@ -1376,7 +1414,7 @@ impl App {
         );
 
         container(
-            row![open, search, options, wrap, patterns]
+            row![open, top, bottom, search, options, wrap, patterns]
                 .spacing(8)
                 .align_y(Alignment::Center),
         )
