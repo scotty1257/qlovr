@@ -108,21 +108,18 @@ the scrollbar thumb, and very large (multi-GB) files with the new renderer.
 1. **The search bar's case toggle is inverted.** `App::start_match_scan` passes `case_on` ("Match
    case") into `Matcher::new`'s `ignore_case` parameter. This was inherited from the egui version
    and is not yet fixed; it's a one-line change.
-2. **The repo screenshots are out of date.** `shot.png`, `shot_f3.png`, `shot_search.png` and
-   `shot_templates.png` still show the old egui UI.
-3. **The file dialog blocks.** `rfd::FileDialog` runs synchronously inside `update`, as it did
+2. **The file dialog blocks.** `rfd::FileDialog` runs synchronously inside `update`, as it did
    under egui. It works on Windows, but the event loop pauses while the dialog is open.
-4. **F3 doesn't fit Exclude.** With Exclude on, F3 still steps through the (now hidden) matches,
+3. **F3 doesn't fit Exclude.** With Exclude on, F3 still steps through the (now hidden) matches,
    so the selection lands on the nearest kept line instead.
-5. **A wrapped line taller than the window shows only its start**, because scrolling moves by
+4. **A wrapped line taller than the window shows only its start**, because scrolling moves by
    whole lines. Lines are capped at `MAX_LINE_BYTES` anyway, but a very long one can be cut off.
-6. **Tab doesn't move focus.** iced has no Tab-key focus navigation for buttons, so the dialogs
+5. **Tab doesn't move focus.** iced has no Tab-key focus navigation for buttons, so the dialogs
    are mouse- and Enter-driven.
 
 ## Possible next steps
 
 - Fix the case-toggle inversion (known issue 1).
-- Replace the stale screenshots.
 - Test the remaining features by hand, especially multi-GB files and scrollbar dragging.
 - Optionally: a light theme or following the system theme (all colours live in `theme.rs`), and
   an async file dialog (`rfd::AsyncFileDialog` with `Task::perform`).
