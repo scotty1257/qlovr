@@ -135,6 +135,10 @@ impl LogView {
         self.active_filter.is_some()
     }
 
+    pub fn active_filter(&self) -> Option<Arc<dyn FilterIndex>> {
+        self.active_filter.clone()
+    }
+
     pub fn visible_rows(&self) -> usize {
         ((self.viewport.get().height / ROW_H) as usize).max(1)
     }

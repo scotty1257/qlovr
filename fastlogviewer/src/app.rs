@@ -13,13 +13,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use fastlogviewer_core::{
-    join_lines, parse_line_range, CancelToken, ComplementIndex, FilterIndex, IntersectionIndex,
-    Joined, LogFile, LogTemplate, LogViewMode, MatchIndex, Matcher, SlotFilterIndex, SlotQuery,
-    TagStore, TemplateIndex, UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
+    bucket_counts, bucket_start, intersection_count, join_lines, parse_line_range, CancelToken,
+    ComplementIndex, FilterIndex, IntersectionIndex, Joined, LogFile, LogTemplate, LogViewMode,
+    MatchIndex, Matcher, PrefixShape, SlotFilterIndex, SlotQuery, TagStore, TemplateIndex,
+    UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::scrollable::{Direction, Scrollbar};
@@ -32,6 +34,7 @@ use uuid::Uuid;
 
 use crate::format::{thousands, thousands_1dp};
 use crate::log_view::{LogView, ViewMessage};
+use crate::stats_ui::{stats_panel, StatsMessage, TagStat, STRIP_BUCKETS};
 use crate::tag_ui::{
     self, copy_view, goto_view, modal, tag_chip, with_tip, ChipAction, CopyChoices, CopyMessage,
     GotoMessage, PopupMessage, PopupOutcome, TagEditPopup,
@@ -95,6 +98,29 @@ enum CopyKind {
     Range(usize, usize),
 }
 
+/// The panel docked to the right of the log, if any.
+#[derive(PartialEq, Eq, Copy, Clone)]
+enum SidePanel {
+    Stats,
+}
+
+/// A match scan the stats panel started for a tag that isn't filtering (filtering tags already
+/// have one in `tag_indexes`). The matcher tells whether the tag was edited since.
+struct StatsScan {
+    matcher: Arc<Matcher>,
+    index: Arc<MatchIndex>,
+    ct: CancelToken,
+}
+
+/// How many of a tag's matches are among the displayed lines, counted on a worker. `key` names
+/// the inputs it was counted from: the filter, the tag's index and both their sizes.
+struct ShownCount {
+    key: [usize; 4],
+    /// -1 until counted.
+    count: Arc<AtomicI64>,
+    ct: CancelToken,
+}
+
 /// Where the view was before a reload, by real line number, put back once the new index is done.
 #[derive(Copy, Clone)]
 struct Restore {
@@ -133,6 +159,8 @@ pub enum Message {
     Goto(GotoMessage),
     OpenCopy,
     Copy(CopyMessage),
+    ToggleStats,
+    Stats(StatsMessage),
     View(ViewMessage),
     KeyPressed {
         key: Key,
@@ -198,6 +226,13 @@ pub struct App {
     copy_open: bool,
     copy_range: String,
     copy_error: Option<String>,
+
+    side_panel: Option<SidePanel>,
+    stats_scans: HashMap<Uuid, StatsScan>,
+    stats_shown: HashMap<Uuid, ShownCount>,
+    /// The file's timestamp shape, sniffed once for the stats panel's first/last times.
+    stats_prefix: Option<PrefixShape>,
+
     chrome_applied: bool,
 }
 
@@ -246,6 +281,10 @@ impl App {
             copy_open: false,
             copy_range: String::new(),
             copy_error: None,
+            side_panel: None,
+            stats_scans: HashMap::new(),
+            stats_shown: HashMap::new(),
+            stats_prefix: None,
             chrome_applied: false,
         };
 
@@ -380,6 +419,7 @@ impl App {
     fn release_current(&mut self) {
         self.cancel_match_scan();
         self.cancel_all_tag_filters();
+        self.stop_stats();
         self.cancel_clustering();
         self.cancel_slot_filter();
         self.zoom = None;
@@ -862,6 +902,222 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------------ stats
+
+    fn stop_stats(&mut self) {
+        for (_, scan) in self.stats_scans.drain() {
+            scan.ct.cancel();
+        }
+        for (_, shown) in self.stats_shown.drain() {
+            shown.ct.cancel();
+        }
+        self.stats_prefix = None;
+    }
+
+    /// The match index the stats panel reads for a tag: the filter's when the tag filters,
+    /// otherwise the panel's own.
+    fn stats_index(&self, id: &Uuid) -> Option<Arc<MatchIndex>> {
+        self.tag_indexes
+            .get(id)
+            .or_else(|| self.stats_scans.get(id).map(|scan| &scan.index))
+            .cloned()
+    }
+
+    /// Keeps one match index per tag while the stats panel is open, and the "of shown" counts
+    /// in step with the current filter. Cheap when nothing changed, so it runs after every update.
+    fn sync_stats(&mut self) {
+        if self.side_panel != Some(SidePanel::Stats) {
+            if !self.stats_scans.is_empty() || !self.stats_shown.is_empty() {
+                self.stop_stats();
+            }
+            return;
+        }
+        let Some(file) = self.file.clone() else {
+            return;
+        };
+
+        let mut wanted = Vec::new();
+        for tag in &self.tag_store.tags {
+            let Some(matcher) = tag.matcher.clone() else {
+                continue;
+            };
+            if matcher.is_valid() && !matcher.is_empty() && !self.tag_indexes.contains_key(&tag.id)
+            {
+                wanted.push((tag.id, matcher));
+            }
+        }
+        let stale: Vec<Uuid> = self
+            .stats_scans
+            .iter()
+            .filter(|(id, scan)| {
+                !wanted
+                    .iter()
+                    .any(|(want, matcher)| want == *id && Arc::ptr_eq(matcher, &scan.matcher))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(scan) = self.stats_scans.remove(&id) {
+                scan.ct.cancel();
+            }
+        }
+        for (id, matcher) in wanted {
+            if self.stats_scans.contains_key(&id) {
+                continue;
+            }
+            let index = Arc::new(MatchIndex::new(matcher.clone(), file.length()));
+            let ct = CancelToken::new();
+            let (building, worker_ct, worker_file) = (index.clone(), ct.clone(), file.clone());
+            std::thread::spawn(move || building.build(&worker_file, &worker_ct));
+            self.stats_scans
+                .insert(id, StatsScan { matcher, index, ct });
+        }
+
+        if self.stats_prefix.is_none() && file.index_complete() {
+            let sample: Vec<Vec<u8>> = (0..file.line_count().min(200))
+                .map(|line| file.get_line(line, 512).into_bytes())
+                .collect();
+            self.stats_prefix = Some(PrefixShape::sniff(&sample));
+        }
+
+        self.sync_shown_counts();
+    }
+
+    /// Recounts each tag's matches among the displayed lines whenever the filter or the tag's
+    /// index changes. Counting waits for the tag's scan to finish.
+    fn sync_shown_counts(&mut self) {
+        let Some(filter) = self.view.active_filter() else {
+            for (_, shown) in self.stats_shown.drain() {
+                shown.ct.cancel();
+            }
+            return;
+        };
+        let ids: Vec<Uuid> = self.tag_store.tags.iter().map(|t| t.id).collect();
+        self.stats_shown.retain(|id, shown| {
+            let keep = ids.contains(id);
+            if !keep {
+                shown.ct.cancel();
+            }
+            keep
+        });
+
+        for id in ids {
+            let Some(index) = self.stats_index(&id).filter(|i| i.is_complete()) else {
+                continue;
+            };
+            let key = [
+                Arc::as_ptr(&filter) as *const () as usize,
+                filter.count(),
+                Arc::as_ptr(&index) as usize,
+                index.count(),
+            ];
+            if self.stats_shown.get(&id).is_some_and(|s| s.key == key) {
+                continue;
+            }
+            if let Some(old) = self.stats_shown.remove(&id) {
+                old.ct.cancel();
+            }
+            let count = Arc::new(AtomicI64::new(-1));
+            let ct = CancelToken::new();
+            let (result, worker_ct, worker_filter) = (count.clone(), ct.clone(), filter.clone());
+            std::thread::spawn(move || {
+                if let Some(n) =
+                    intersection_count(index.as_ref(), worker_filter.as_ref(), &worker_ct)
+                {
+                    result.store(n as i64, Ordering::Release);
+                }
+            });
+            self.stats_shown.insert(id, ShownCount { key, count, ct });
+        }
+    }
+
+    fn stats_busy(&self) -> bool {
+        self.side_panel == Some(SidePanel::Stats)
+            && (self.stats_scans.values().any(|s| !s.index.is_complete())
+                || self
+                    .stats_shown
+                    .values()
+                    .any(|s| s.count.load(Ordering::Acquire) < 0))
+    }
+
+    /// The leading timestamp of a line, or "" when it has none the sniffed shape recognises.
+    fn timestamp_of(&self, file: &LogFile, line: usize) -> String {
+        let Some(shape) = self.stats_prefix else {
+            return String::new();
+        };
+        let mut buf = [0u8; 256];
+        let len = file.copy_line(line, &mut buf);
+        let ts = shape.measure_timestamp(&buf, len);
+        String::from_utf8_lossy(&buf[..ts.min(len)])
+            .trim()
+            .to_string()
+    }
+
+    fn tag_stats(&self) -> Vec<TagStat> {
+        let Some(file) = self.file.as_ref() else {
+            return Vec::new();
+        };
+        let total = file.line_count();
+        let shown_total = self.view.display_count();
+        let mut stats = Vec::new();
+        for tag in &self.tag_store.tags {
+            let Some(index) = self.stats_index(&tag.id) else {
+                continue;
+            };
+            let count = index.count();
+            let end = |i: usize| {
+                let line = index.get(i) as i64;
+                (line, self.timestamp_of(file, line as usize))
+            };
+            let [r, g, b] = tag.color();
+            stats.push(TagStat {
+                id: tag.id,
+                label: tag.label.clone(),
+                color: Color::from_rgb8(r, g, b),
+                count,
+                complete: index.is_complete(),
+                share: percent(count, total),
+                shown_share: self
+                    .stats_shown
+                    .get(&tag.id)
+                    .map(|s| s.count.load(Ordering::Acquire))
+                    .filter(|n| *n >= 0)
+                    .map(|n| percent(n as usize, shown_total)),
+                buckets: bucket_counts(index.as_ref(), total, STRIP_BUCKETS),
+                first: (count > 0).then(|| end(0)),
+                last: (count > 0 && index.is_complete()).then(|| end(count - 1)),
+            });
+        }
+        stats
+    }
+
+    fn apply_stats_message(&mut self, message: StatsMessage) {
+        match message {
+            StatsMessage::Close => self.side_panel = None,
+            StatsMessage::JumpToLine(line) => self.go_to_line_in_lines(line),
+            StatsMessage::JumpToBucket(id, bucket) => {
+                let (Some(file), Some(index)) = (self.file.clone(), self.stats_index(&id)) else {
+                    return;
+                };
+                let total = file.line_count();
+                let start = bucket_start(bucket, total, STRIP_BUCKETS);
+                let end = bucket_start(bucket + 1, total, STRIP_BUCKETS);
+                let i = index.index_at_or_after(start as i32);
+                if i < index.count() && (index.get(i) as usize) < end.max(start + 1) {
+                    self.go_to_line_in_lines(index.get(i) as i64);
+                }
+            }
+        }
+    }
+
+    /// Jumps to a real file line, leaving the pattern list first if it is showing.
+    fn go_to_line_in_lines(&mut self, line: i64) {
+        if self.view.mode() == LogViewMode::Templates {
+            self.leave_templates();
+        }
+        self.view.go_to_actual(line);
+    }
+
     // ------------------------------------------------------------------- copy
 
     fn copy(&mut self, kind: CopyKind) -> Task<Message> {
@@ -1214,6 +1470,8 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.apply(message);
         self.refresh_status();
+        self.sync_stats();
+        self.busy |= self.stats_busy();
         task
     }
 
@@ -1300,6 +1558,13 @@ impl App {
                 }
                 GotoMessage::Cancel => self.close_goto(),
             },
+            Message::ToggleStats => {
+                self.side_panel = match self.side_panel {
+                    Some(SidePanel::Stats) => None,
+                    _ => Some(SidePanel::Stats),
+                };
+            }
+            Message::Stats(message) => self.apply_stats_message(message),
             Message::OpenCopy => return self.open_copy_dialog(),
             Message::Copy(message) => return self.apply_copy_message(message),
             Message::View(message) => match message {
@@ -1483,14 +1748,20 @@ impl App {
         if let Some(crumb) = self.breadcrumb() {
             layout = layout.push(crumb).push(rule());
         }
-        let layout = layout
-            .push(
-                container(surface)
-                    .height(Length::Fill)
-                    .style(theme::log_surface),
-            )
-            .push(rule())
-            .push(self.status_bar());
+        let surface = container(surface)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::log_surface);
+        let body: Element<'_, Message> = match self.side_panel {
+            Some(SidePanel::Stats) if self.file.is_some() => row![
+                surface,
+                vertical_rule(),
+                stats_panel(self.tag_stats(), self.view.filter_on()).map(Message::Stats),
+            ]
+            .into(),
+            _ => surface.into(),
+        };
+        let layout = layout.push(body).push(rule()).push(self.status_bar());
 
         let base = container(layout)
             .width(Length::Fill)
@@ -1751,6 +2022,15 @@ impl App {
             "Add a saved highlight / filter",
             tooltip::Position::Bottom,
         ));
+        let stats_on = self.side_panel == Some(SidePanel::Stats);
+        chips = chips.push(with_tip(
+            button(text("Stats").size(theme::SMALL_SIZE))
+                .padding([4, 10])
+                .style(theme::toggle(stats_on))
+                .on_press_maybe(self.file.is_some().then_some(Message::ToggleStats)),
+            "How often each tag matches, and where in the file",
+            tooltip::Position::Bottom,
+        ));
 
         container(scrollable(chips).direction(Direction::Horizontal(
             Scrollbar::new().width(0).scroller_width(0),
@@ -1903,6 +2183,23 @@ fn icon<'a>(bytes: &'static [u8], size: f32, color: Color) -> svg::Svg<'a> {
         .width(size)
         .height(size)
         .style(theme::icon(color))
+}
+
+/// A one-pixel vertical divider.
+fn vertical_rule<'a>() -> Element<'a, Message> {
+    container(space())
+        .width(1)
+        .height(Length::Fill)
+        .style(theme::divider)
+        .into()
+}
+
+fn percent(part: usize, whole: usize) -> f64 {
+    if whole == 0 {
+        0.0
+    } else {
+        100.0 * part as f64 / whole as f64
+    }
 }
 
 /// A one-pixel horizontal divider.

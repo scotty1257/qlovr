@@ -20,6 +20,7 @@ pub mod match_index;
 pub mod matcher;
 pub mod slot_filter;
 pub mod slot_query;
+pub mod stats;
 pub mod tags;
 pub mod templates;
 
@@ -32,6 +33,7 @@ pub use match_index::MatchIndex;
 pub use matcher::Matcher;
 pub use slot_filter::SlotFilterIndex;
 pub use slot_query::SlotQuery;
+pub use stats::{bucket_counts, bucket_start, intersection_count};
 pub use tags::{TagDef, TagStore, TAG_PALETTE};
 pub use templates::{
     LogTemplate, LogViewMode, PrefixKind, PrefixShape, TemplateIndex, TemplateTree, TokenBuffer,
