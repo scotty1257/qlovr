@@ -12,6 +12,7 @@ use crate::theme;
 
 pub const TAG_LABEL_INPUT: Id = Id::new("tag_label");
 pub const GOTO_INPUT: Id = Id::new("goto_line");
+pub const COPY_RANGE_INPUT: Id = Id::new("copy_range");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChipAction {
@@ -379,4 +380,118 @@ pub fn goto_view(input: &str, line_count: usize) -> Element<'_, GotoMessage> {
     .spacing(16);
 
     dialog_card(300.0, body)
+}
+
+// ------------------------------------------------------------------------ copy
+
+#[derive(Debug, Clone)]
+pub enum CopyMessage {
+    Selection,
+    Line,
+    Lines,
+    RangeInput(String),
+    Range,
+    Cancel,
+}
+
+/// What there is to copy right now, so the dialog can grey out what isn't available.
+pub struct CopyChoices {
+    pub has_text: bool,
+    /// 1-based number of the current line.
+    pub line: Option<i64>,
+    /// How many lines are selected.
+    pub lines: usize,
+}
+
+pub fn copy_view<'a>(
+    choices: CopyChoices,
+    range: &'a str,
+    error: Option<&'a str>,
+    line_count: usize,
+) -> Element<'a, CopyMessage> {
+    let choice = |label: String, hint: &'static str, message: Option<CopyMessage>| {
+        button(
+            row![
+                text(label).size(theme::UI_SIZE),
+                space().width(Length::Fill),
+                text(hint).size(theme::SMALL_SIZE).color(theme::TEXT_FAINT),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([7, 12])
+        .style(theme::secondary)
+        .on_press_maybe(message)
+    };
+
+    let line_label = match choices.line {
+        Some(n) => format!("Current line ({})", crate::format::thousands(n as u64)),
+        None => "Current line".to_string(),
+    };
+    let lines_label = if choices.lines > 1 {
+        format!(
+            "Selected lines ({})",
+            crate::format::thousands(choices.lines as u64)
+        )
+    } else {
+        "Selected lines".to_string()
+    };
+
+    let body = column![
+        text("Copy").size(17),
+        column![
+            choice(
+                "Selected text".to_string(),
+                "Ctrl+C",
+                choices.has_text.then_some(CopyMessage::Selection),
+            ),
+            choice(
+                line_label,
+                "",
+                choices.line.map(|_| CopyMessage::Line)
+            ),
+            choice(
+                lines_label,
+                "Shift+click",
+                (choices.lines > 0).then_some(CopyMessage::Lines),
+            ),
+        ]
+        .spacing(6),
+        column![
+            field_label("Line range"),
+            row![
+                text_input(
+                    &format!("from-to, e.g. 1-{}", line_count.min(100)),
+                    range
+                )
+                .id(COPY_RANGE_INPUT)
+                .on_input(CopyMessage::RangeInput)
+                .on_submit(CopyMessage::Range)
+                .font(theme::MONO)
+                .padding([8, 10])
+                .size(theme::MONO_SIZE)
+                .style(theme::input),
+                button(text("Copy range").size(theme::UI_SIZE))
+                    .padding([8, 14])
+                    .style(theme::primary)
+                    .on_press_maybe((!range.trim().is_empty()).then_some(CopyMessage::Range)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            text(error.unwrap_or(""))
+                .size(theme::SMALL_SIZE)
+                .color(theme::ERROR),
+        ]
+        .spacing(6),
+        row![
+            space().width(Length::Fill),
+            button(text("Cancel").size(theme::UI_SIZE))
+                .padding([7, 14])
+                .style(theme::secondary)
+                .on_press(CopyMessage::Cancel),
+        ],
+    ]
+    .spacing(16);
+
+    dialog_card(380.0, body)
 }

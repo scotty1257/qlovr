@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastlogviewer_core::{
-    FilterIndex, LogFile, LogTemplate, LogViewMode, MatchIndex, Matcher, TagDef, MAX_LINE_BYTES,
+    copy_text_of, join_texts, FilterIndex, Joined, LogFile, LogTemplate, LogViewMode, MatchIndex,
+    Matcher, TagDef, MAX_LINE_BYTES,
 };
 use iced::alignment::Vertical;
 use iced::keyboard::{self, key::Named, Key};
@@ -47,6 +48,15 @@ pub enum ViewMessage {
     Select(usize),
     /// Double-click on a row: zooms into a pattern, or wraps/unwraps a log line.
     Activate(usize),
+    /// A press-and-drag over text: where it started and where the pointer is now.
+    DragText(TextPos, TextPos),
+}
+
+/// A character position: display row and char column within that row's line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextPos {
+    pub display: usize,
+    pub col: usize,
 }
 
 /// What a key press did that the app has to act on.
@@ -54,7 +64,7 @@ pub enum ViewMessage {
 pub struct KeyOutcome {
     pub template_activated: bool,
     pub escape_pressed: bool,
-    pub copy: Option<String>,
+    pub copy_requested: bool,
 }
 
 pub struct LogView {
@@ -62,6 +72,10 @@ pub struct LogView {
     left_col: usize,
     /// -1 when nothing is selected, which is "before the first row" for keyboard navigation.
     selected: i64,
+    /// The other end of a multi-line selection (Shift+click, Shift+arrows); -1 for none.
+    anchor: i64,
+    /// Characters selected by dragging, as (where the drag began, where it is now).
+    text_sel: Option<(TextPos, TextPos)>,
 
     mode: LogViewMode,
     templates: Vec<Arc<LogTemplate>>,
@@ -81,9 +95,10 @@ pub struct LogView {
 
     /// Text area (canvas minus scrollbars), as of the last draw.
     viewport: Cell<Size>,
-    /// The display row drawn on each screen row, as of the last draw. Wrapped lines span several
-    /// screen rows, so mouse hit-testing needs this instead of `top + y / ROW_H`.
-    row_lines: RefCell<Vec<usize>>,
+    /// The display row drawn on each screen row, and which wrapped piece of it, as of the last
+    /// draw. Wrapped lines span several screen rows, so mouse hit-testing needs this instead of
+    /// `top + y / ROW_H`.
+    row_lines: RefCell<Vec<(usize, usize)>>,
 }
 
 impl LogView {
@@ -92,6 +107,8 @@ impl LogView {
             top: 0,
             left_col: 0,
             selected: -1,
+            anchor: -1,
+            text_sel: None,
             mode: LogViewMode::Lines,
             templates: Vec::new(),
             rare_threshold: 0,
@@ -203,6 +220,7 @@ impl LogView {
         self.top = 0;
         self.left_col = 0;
         self.selected = -1;
+        self.clear_extra_selection();
         self.wrapped.clear();
         self.matches = None;
         self.current_match_line = -1;
@@ -227,6 +245,7 @@ impl LogView {
         self.active_filter = filter;
         self.top = 0;
         self.selected = -1;
+        self.clear_extra_selection();
         if keep >= 0 {
             self.go_to_actual(keep);
         }
@@ -241,6 +260,7 @@ impl LogView {
             self.top = 0;
             self.left_col = 0;
             self.selected = -1;
+            self.clear_extra_selection();
         }
         if self.selected >= self.templates.len() as i64 {
             self.selected = self.templates.len() as i64 - 1;
@@ -255,6 +275,105 @@ impl LogView {
         self.mode = LogViewMode::Lines;
         self.top = 0;
         self.selected = -1;
+        self.clear_extra_selection();
+    }
+
+    // -------------------------------------------------------------- selection
+
+    /// Drops the multi-line and text selections, leaving at most the one selected row.
+    fn clear_extra_selection(&mut self) {
+        self.anchor = -1;
+        self.text_sel = None;
+    }
+
+    /// Extends the line selection from its anchor to `display` (Shift+click, Shift+arrows).
+    pub fn extend_selection(&mut self, display: usize) {
+        if self.mode != LogViewMode::Lines || display >= self.display_count() {
+            return;
+        }
+        if self.anchor < 0 {
+            self.anchor = if self.selected >= 0 { self.selected } else { display as i64 };
+        }
+        self.selected = display as i64;
+        self.text_sel = None;
+    }
+
+    pub fn select_all(&mut self) {
+        let count = self.display_count();
+        if self.mode != LogViewMode::Lines || count == 0 {
+            return;
+        }
+        self.anchor = 0;
+        self.selected = count as i64 - 1;
+        self.text_sel = None;
+    }
+
+    /// Selects characters from `from` to `to`; the rows they span become the line selection.
+    pub fn set_text_selection(&mut self, from: TextPos, to: TextPos) {
+        let count = self.display_count();
+        if self.mode != LogViewMode::Lines || from.display >= count || to.display >= count {
+            return;
+        }
+        self.anchor = from.display as i64;
+        self.selected = to.display as i64;
+        self.text_sel = Some((from, to));
+    }
+
+    /// The selected display rows, first to last. `None` with nothing selected or outside lines.
+    pub fn selected_line_range(&self) -> Option<(usize, usize)> {
+        let count = self.display_count() as i64;
+        if self.mode != LogViewMode::Lines || self.selected < 0 || self.selected >= count {
+            return None;
+        }
+        let anchor = if (0..count).contains(&self.anchor) {
+            self.anchor
+        } else {
+            self.selected
+        };
+        Some((
+            self.selected.min(anchor) as usize,
+            self.selected.max(anchor) as usize,
+        ))
+    }
+
+    /// The dragged-over characters in reading order, or `None` when nothing (or nothing but an
+    /// empty span) is selected.
+    fn text_range(&self) -> Option<(TextPos, TextPos)> {
+        let (a, b) = self.text_sel?;
+        let count = self.display_count();
+        if a == b || self.mode != LogViewMode::Lines || a.display >= count || b.display >= count {
+            return None;
+        }
+        Some((a.min(b), a.max(b)))
+    }
+
+    pub fn has_text_selection(&self) -> bool {
+        self.text_range().is_some()
+    }
+
+    /// The dragged-over text, one piece per row, capped at `limit` bytes.
+    pub fn selected_text(&self, limit: usize) -> Option<Joined> {
+        let (a, b) = self.text_range()?;
+        let file = self.file.clone()?;
+        let pieces = (a.display..=b.display).map(move |display| {
+            let chars: Vec<char> = copy_text_of(&file, self.actual_line(display) as usize)
+                .chars()
+                .collect();
+            let from = if display == a.display { a.col } else { 0 }.min(chars.len());
+            let to = if display == b.display { b.col } else { chars.len() }.clamp(from, chars.len());
+            chars[from..to].iter().collect::<String>()
+        });
+        Some(join_texts(pieces, limit))
+    }
+
+    /// Scrolls just enough to show `display`.
+    fn reveal(&mut self, display: i64) {
+        let rows = self.visible_rows() as i64;
+        if display < self.top as i64 {
+            self.scroll_to(display);
+        } else if display >= self.top as i64 + rows {
+            self.scroll_to(display - rows + 1);
+        }
     }
 
     // --------------------------------------------------------------- scrolling
@@ -311,6 +430,7 @@ impl LogView {
         }
         let display = display.clamp(0, count as i64 - 1);
         self.selected = display;
+        self.clear_extra_selection();
         let rows = self.visible_rows() as i64;
         if display < self.top as i64 || display >= self.top as i64 + rows {
             self.scroll_to(display - rows / 3);
@@ -384,6 +504,7 @@ impl LogView {
     pub fn select(&mut self, display: usize) {
         if display < self.display_count() {
             self.selected = display as i64;
+            self.clear_extra_selection();
         }
     }
 
@@ -441,12 +562,21 @@ impl LogView {
             return outcome;
         }
 
-        let Some(file) = self.file.clone() else {
+        if self.file.is_none() {
             return outcome;
-        };
+        }
         let ctrl = modifiers.command();
+        let shift = modifiers.shift();
 
         match key {
+            Key::Named(Named::ArrowUp) if shift && self.selected > 0 => {
+                self.extend_selection(self.selected as usize - 1);
+                self.reveal(self.selected);
+            }
+            Key::Named(Named::ArrowDown) if shift && self.selected >= 0 => {
+                self.extend_selection(self.selected as usize + 1);
+                self.reveal(self.selected);
+            }
             Key::Named(Named::ArrowUp) => self.scroll_by(-1),
             Key::Named(Named::ArrowDown) => self.scroll_by(1),
             Key::Named(Named::PageUp) => self.scroll_by(-rows),
@@ -462,12 +592,9 @@ impl LogView {
             }
             Key::Named(Named::Escape) => outcome.escape_pressed = true,
             Key::Character(c) if ctrl && c.as_str().eq_ignore_ascii_case("c") => {
-                if self.selected >= 0 {
-                    let line = self.actual_line(self.selected as usize);
-                    let text = file.get_line(line as usize, 1 << 20);
-                    outcome.copy = Some(if text.is_empty() { " ".to_string() } else { text });
-                }
+                outcome.copy_requested = true;
             }
+            Key::Character(c) if ctrl && c.as_str().eq_ignore_ascii_case("a") => self.select_all(),
             _ => {}
         }
         outcome
@@ -496,6 +623,8 @@ impl LogView {
         let mut ranges: Vec<i32> = Vec::with_capacity(64);
         let mut tag_ranges: Vec<i32> = Vec::with_capacity(32);
         let mut ink: Vec<Color> = Vec::new();
+        let line_sel = self.selected_line_range();
+        let text_sel = self.text_range();
         let mut row_lines = self.row_lines.borrow_mut();
         row_lines.clear();
 
@@ -506,7 +635,7 @@ impl LogView {
             let chars: Vec<char> = full.chars().collect();
             let y = row_lines.len() as f32 * ROW_H;
             let is_current = line == self.current_match_line;
-            let is_selected = display as i64 == self.selected;
+            let is_selected = line_sel.is_some_and(|(a, b)| (a..=b).contains(&display));
             let level = level_span(&full);
 
             // A wrapped line is cut into `wrap_cols` pieces from column 0; an unwrapped one is a
@@ -518,7 +647,7 @@ impl LogView {
             };
             let pieces = pieces.min(screen_rows - row_lines.len());
             let height = pieces as f32 * ROW_H;
-            row_lines.extend(std::iter::repeat_n(display, pieces));
+            row_lines.extend((0..pieces).map(|piece| (display, piece)));
 
             if is_selected {
                 frame.fill_rectangle(
@@ -609,6 +738,19 @@ impl LogView {
                 // 1) match backgrounds
                 for pair in ranges.chunks_exact(2) {
                     self.fill_columns(frame, pair, start, piece_len, y, match_bg);
+                }
+
+                // 1b) dragged-over text
+                if let Some((a, b)) =
+                    text_sel.filter(|(a, b)| (a.display..=b.display).contains(&display))
+                {
+                    let from = if display == a.display { a.col } else { 0 };
+                    let to = if display == b.display { b.col } else { chars.len() };
+                    if to > from {
+                        let pair = [from as i32, (to - from) as i32];
+                        let brush = theme::alpha(theme::ACCENT, 0.35);
+                        self.fill_columns(frame, &pair, start, piece_len, y, brush);
+                    }
                 }
 
                 // 2) the text, split into runs of one colour each so nothing is drawn twice
@@ -818,7 +960,26 @@ impl LogView {
         if self.mode == LogViewMode::Templates {
             return self.top + screen_row;
         }
-        self.row_lines.borrow().get(screen_row).copied().unwrap_or(usize::MAX)
+        self.row_lines.borrow().get(screen_row).map_or(usize::MAX, |r| r.0)
+    }
+
+    /// The character position nearest `point`, clamped to the drawn rows so a drag past the top
+    /// or bottom edge still lands somewhere. `None` outside lines mode or with nothing drawn.
+    fn text_pos_at(&self, point: Point) -> Option<TextPos> {
+        if self.mode != LogViewMode::Lines {
+            return None;
+        }
+        let row_lines = self.row_lines.borrow();
+        let last = row_lines.len().checked_sub(1)?;
+        let screen_row = ((point.y / ROW_H).max(0.0) as usize).min(last);
+        let (display, piece) = row_lines[screen_row];
+        let col = ((point.x - self.text_x()) / CHAR_W).round().max(0.0) as usize;
+        let col = if self.is_wrapped(self.actual_line(display)) {
+            piece * self.visible_cols() + col
+        } else {
+            self.left_col + col
+        };
+        Some(TextPos { display, col })
     }
 }
 
@@ -919,6 +1080,8 @@ pub struct CanvasState {
     hover_row: Option<usize>,
     /// When and on which row the last click landed, to recognise a double-click.
     last_click: Option<(Instant, usize)>,
+    /// Where the left button went down over text, while it is held: the start of a text drag.
+    press: Option<TextPos>,
 }
 
 impl canvas::Program<ViewMessage> for LogView {
@@ -981,6 +1144,7 @@ impl canvas::Program<ViewMessage> for LogView {
                     .last_click
                     .is_some_and(|(at, last_row)| last_row == row && now - at < DOUBLE_CLICK);
                 state.last_click = if double { None } else { Some((now, row)) };
+                state.press = if double { None } else { self.text_pos_at(p) };
                 let message = if double {
                     ViewMessage::Activate(row)
                 } else {
@@ -989,6 +1153,7 @@ impl canvas::Program<ViewMessage> for LogView {
                 Some(Action::publish(message).and_capture())
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.press = None;
                 state.drag.take()?;
                 Some(Action::request_redraw())
             }
@@ -1009,6 +1174,12 @@ impl canvas::Program<ViewMessage> for LogView {
                         let col = (at * max_left as f32).round() as i64;
                         Some(Action::publish(ViewMessage::ScrollColTo(col)))
                     };
+                }
+                if let Some(from) = state.press {
+                    let p = cursor.position_from(bounds.position())?;
+                    let to = self.text_pos_at(p)?;
+                    return (to != from || self.text_sel.is_some())
+                        .then(|| Action::publish(ViewMessage::DragText(from, to)));
                 }
 
                 let p = cursor.position_in(bounds);
@@ -1090,6 +1261,13 @@ impl canvas::Program<ViewMessage> for LogView {
     ) -> mouse::Interaction {
         if state.drag.is_some() {
             return mouse::Interaction::Grabbing;
+        }
+        let size = self.viewport.get();
+        let over_text = cursor.position_in(bounds).is_some_and(|p| {
+            p.x >= self.text_x() && p.x < size.width && p.y < size.height
+        });
+        if self.mode == LogViewMode::Lines && (over_text || state.press.is_some()) {
+            return mouse::Interaction::Text;
         }
         if self.mode == LogViewMode::Templates
             && cursor.position_in(bounds).is_some_and(|p| self.row_at(p) < self.templates.len())

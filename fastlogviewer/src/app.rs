@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use fastlogviewer_core::{
-    CancelToken, ComplementIndex, FilterIndex, IntersectionIndex, LogFile, LogTemplate,
-    LogViewMode, MatchIndex, Matcher, SlotFilterIndex, SlotQuery, TagStore, TemplateIndex,
-    UnionFilterIndex, TAG_PALETTE,
+    join_lines, parse_line_range, CancelToken, ComplementIndex, FilterIndex, IntersectionIndex,
+    Joined, LogFile, LogTemplate, LogViewMode, MatchIndex, Matcher, SlotFilterIndex, SlotQuery,
+    TagStore, TemplateIndex, UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::scrollable::{Direction, Scrollbar};
@@ -33,8 +33,8 @@ use uuid::Uuid;
 use crate::format::{thousands, thousands_1dp};
 use crate::log_view::{LogView, ViewMessage};
 use crate::tag_ui::{
-    self, goto_view, modal, tag_chip, with_tip, ChipAction, GotoMessage, PopupMessage,
-    PopupOutcome, TagEditPopup,
+    self, copy_view, goto_view, modal, tag_chip, with_tip, ChipAction, CopyChoices, CopyMessage,
+    GotoMessage, PopupMessage, PopupOutcome, TagEditPopup,
 };
 use crate::theme::{self, icons};
 use crate::win;
@@ -78,6 +78,23 @@ enum DiskState {
     Missing,
 }
 
+/// A short message in the status bar: a failed reload, a copy's result.
+struct Notice {
+    text: String,
+    error: bool,
+    at: Instant,
+}
+
+#[derive(Copy, Clone)]
+enum CopyKind {
+    /// The dragged-over text, or the selected lines when nothing was dragged (Ctrl+C).
+    Selection,
+    Line,
+    Lines,
+    /// 0-based, inclusive file lines.
+    Range(usize, usize),
+}
+
 /// Where the view was before a reload, by real line number, put back once the new index is done.
 #[derive(Copy, Clone)]
 struct Restore {
@@ -114,6 +131,8 @@ pub enum Message {
     Chip(Uuid, ChipAction),
     Popup(PopupMessage),
     Goto(GotoMessage),
+    OpenCopy,
+    Copy(CopyMessage),
     View(ViewMessage),
     KeyPressed {
         key: Key,
@@ -138,7 +157,7 @@ pub struct App {
     file_stamp: Option<FileStamp>,
     disk_state: DiskState,
     pending_restore: Option<Restore>,
-    notice: Option<(String, Instant)>,
+    notice: Option<Notice>,
 
     search: String,
     regex_on: bool,
@@ -176,6 +195,9 @@ pub struct App {
     popup: Option<TagEditPopup>,
     goto_open: bool,
     goto_text: String,
+    copy_open: bool,
+    copy_range: String,
+    copy_error: Option<String>,
     chrome_applied: bool,
 }
 
@@ -221,6 +243,9 @@ impl App {
             popup: None,
             goto_open: false,
             goto_text: String::new(),
+            copy_open: false,
+            copy_range: String::new(),
+            copy_error: None,
             chrome_applied: false,
         };
 
@@ -295,10 +320,7 @@ impl App {
         let path = file.path().to_path_buf();
         if !path.is_file() {
             self.disk_state = DiskState::Missing;
-            self.notice = Some((
-                "Cannot reload: the file no longer exists".to_string(),
-                Instant::now(),
-            ));
+            self.notify("Cannot reload: the file no longer exists", true);
             return;
         }
 
@@ -315,6 +337,14 @@ impl App {
         if self.file.is_some() {
             self.pending_restore = Some(restore);
         }
+    }
+
+    fn notify(&mut self, text: impl Into<String>, error: bool) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            error,
+            at: Instant::now(),
+        });
     }
 
     fn check_disk(&mut self) {
@@ -832,6 +862,102 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------------- copy
+
+    fn copy(&mut self, kind: CopyKind) -> Task<Message> {
+        let Some(file) = self.file.clone() else {
+            return Task::none();
+        };
+        let joined = match kind {
+            CopyKind::Selection => match self.view.selected_text(COPY_LIMIT_BYTES) {
+                Some(joined) => joined,
+                None => return self.copy(CopyKind::Lines),
+            },
+            CopyKind::Line => {
+                let line = self.view.selected_actual_line();
+                if line < 0 || self.view.mode() != LogViewMode::Lines {
+                    return Task::none();
+                }
+                join_lines(&file, std::iter::once(line as usize), COPY_LIMIT_BYTES)
+            }
+            CopyKind::Lines => {
+                let Some((first, last)) = self.view.selected_line_range() else {
+                    return Task::none();
+                };
+                let lines = (first..=last).map(|display| self.view.line_at(display) as usize);
+                join_lines(&file, lines, COPY_LIMIT_BYTES)
+            }
+            CopyKind::Range(first, last) => join_lines(&file, first..=last, COPY_LIMIT_BYTES),
+        };
+        self.report_copy(&joined);
+        // An empty clipboard write is ignored, so an empty line still copies as something.
+        iced::clipboard::write(if joined.text.is_empty() {
+            " ".to_string()
+        } else {
+            joined.text
+        })
+    }
+
+    fn report_copy(&mut self, joined: &Joined) {
+        let lines = thousands(joined.lines as u64);
+        if joined.truncated {
+            self.notify(
+                format!(
+                    "Copied only the first {lines} lines: a copy stops at {} MB",
+                    COPY_LIMIT_BYTES >> 20
+                ),
+                true,
+            );
+        } else if joined.lines == 1 {
+            self.notify("Copied", false);
+        } else {
+            self.notify(format!("Copied {lines} lines"), false);
+        }
+    }
+
+    fn open_copy_dialog(&mut self) -> Task<Message> {
+        if self.file.is_none() {
+            return Task::none();
+        }
+        self.copy_open = true;
+        self.copy_error = None;
+        operation::focus(tag_ui::COPY_RANGE_INPUT)
+    }
+
+    fn close_copy(&mut self) {
+        self.copy_open = false;
+        self.copy_error = None;
+    }
+
+    fn apply_copy_message(&mut self, message: CopyMessage) -> Task<Message> {
+        let kind = match message {
+            CopyMessage::Selection => CopyKind::Selection,
+            CopyMessage::Line => CopyKind::Line,
+            CopyMessage::Lines => CopyKind::Lines,
+            CopyMessage::RangeInput(text) => {
+                self.copy_range = text;
+                self.copy_error = None;
+                return Task::none();
+            }
+            CopyMessage::Range => {
+                let lines = self.file.as_ref().map_or(0, |f| f.line_count());
+                match parse_line_range(&self.copy_range, lines) {
+                    Ok((first, last)) => CopyKind::Range(first, last),
+                    Err(error) => {
+                        self.copy_error = Some(error);
+                        return Task::none();
+                    }
+                }
+            }
+            CopyMessage::Cancel => {
+                self.close_copy();
+                return Task::none();
+            }
+        };
+        self.close_copy();
+        self.copy(kind)
+    }
+
     // ----------------------------------------------------------------- status
 
     /// "  ·  line N of M (P%)" for the selected row, or the top row when nothing is selected.
@@ -1135,7 +1261,7 @@ impl App {
                 if self
                     .notice
                     .as_ref()
-                    .is_some_and(|(_, at)| at.elapsed() >= NOTICE_FOR)
+                    .is_some_and(|notice| notice.at.elapsed() >= NOTICE_FOR)
                 {
                     self.notice = None;
                 }
@@ -1174,12 +1300,18 @@ impl App {
                 }
                 GotoMessage::Cancel => self.close_goto(),
             },
+            Message::OpenCopy => return self.open_copy_dialog(),
+            Message::Copy(message) => return self.apply_copy_message(message),
             Message::View(message) => match message {
                 ViewMessage::ScrollRows(delta) => self.view.scroll_by(delta),
                 ViewMessage::ScrollCols(delta) => self.view.scroll_cols_by(delta),
                 ViewMessage::ScrollTo(top) => self.view.scroll_to(top),
                 ViewMessage::ScrollColTo(col) => self.view.scroll_cols_to(col),
+                ViewMessage::Select(row) if self.modifiers.shift() => {
+                    self.view.extend_selection(row)
+                }
                 ViewMessage::Select(row) => self.view.select(row),
+                ViewMessage::DragText(from, to) => self.view.set_text_selection(from, to),
                 ViewMessage::Activate(row) => {
                     self.view.select(row);
                     if self.view.mode() == LogViewMode::Templates {
@@ -1227,10 +1359,11 @@ impl App {
         modifiers: keyboard::Modifiers,
         captured: bool,
     ) -> Task<Message> {
-        if self.popup.is_some() || self.goto_open {
+        if self.popup.is_some() || self.goto_open || self.copy_open {
             if key == Key::Named(Named::Escape) {
                 self.popup = None;
                 self.close_goto();
+                self.close_copy();
             }
             return Task::none();
         }
@@ -1238,6 +1371,7 @@ impl App {
         if modifiers.command() {
             if let Key::Character(c) = &key {
                 match c.to_lowercase().as_str() {
+                    "c" if modifiers.shift() => return self.open_copy_dialog(),
                     "o" => {
                         self.open_dialog();
                         return Task::none();
@@ -1300,10 +1434,10 @@ impl App {
         if outcome.escape_pressed {
             self.step_out_one_zoom_level();
         }
-        match outcome.copy {
-            Some(text) => iced::clipboard::write(text),
-            None => Task::none(),
+        if outcome.copy_requested {
+            return self.copy(CopyKind::Selection);
         }
+        Task::none()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -1372,6 +1506,20 @@ impl App {
                 modal(goto_view(&self.goto_text, lines).map(Message::Goto))
             ]
             .into()
+        } else if self.copy_open {
+            let lines = self.file.as_ref().map_or(0, |f| f.line_count());
+            let in_lines = self.view.mode() == LogViewMode::Lines;
+            let line = self.view.selected_actual_line();
+            let choices = CopyChoices {
+                has_text: self.view.has_text_selection(),
+                line: (in_lines && line >= 0).then_some(line + 1),
+                lines: self
+                    .view
+                    .selected_line_range()
+                    .map_or(0, |(first, last)| last - first + 1),
+            };
+            let dialog = copy_view(choices, &self.copy_range, self.copy_error.as_deref(), lines);
+            stack![base, modal(dialog.map(Message::Copy))].into()
         } else {
             base.into()
         }
@@ -1400,6 +1548,7 @@ impl App {
             )
         };
         let reload = jump(icons::RELOAD, Message::Reload, "Reload the file  (F5)");
+        let copy = jump(icons::COPY, Message::OpenCopy, "Copy…  (Ctrl+Shift+C)");
         let top = jump(icons::TO_TOP, Message::GoTop, "Go to top  (Ctrl+Home)");
         let bottom = jump(
             icons::TO_BOTTOM,
@@ -1568,7 +1717,7 @@ impl App {
         }
 
         container(
-            row![tools, top, bottom, search, options, wrap, patterns]
+            row![tools, top, bottom, copy, search, options, wrap, patterns]
                 .spacing(8)
                 .align_y(Alignment::Center),
         )
@@ -1677,12 +1826,16 @@ impl App {
         )
         .spacing(8)
         .align_y(Alignment::Center);
-        if let Some((notice, at)) = &self.notice {
-            if at.elapsed() < NOTICE_FOR {
+        if let Some(notice) = &self.notice {
+            if notice.at.elapsed() < NOTICE_FOR {
                 bar = bar.push(
-                    text(notice)
+                    text(&notice.text)
                         .size(theme::SMALL_SIZE)
-                        .color(theme::ERROR)
+                        .color(if notice.error {
+                            theme::ERROR
+                        } else {
+                            theme::ACCENT
+                        })
                         .wrapping(text::Wrapping::None),
                 );
             }

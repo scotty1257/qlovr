@@ -12,6 +12,7 @@
 // That is the same publish discipline the original C# used with `Volatile.Write`, made explicit.
 
 pub mod cancel;
+pub mod copy;
 pub mod filter;
 pub mod line_numbers;
 pub mod log_file;
@@ -23,6 +24,7 @@ pub mod tags;
 pub mod templates;
 
 pub use cancel::CancelToken;
+pub use copy::{copy_text_of, join_lines, join_texts, parse_line_range, Joined, COPY_LIMIT_BYTES};
 pub use filter::{ComplementIndex, FilterIndex, IntersectionIndex, UnionFilterIndex};
 pub use line_numbers::LineNumberList;
 pub use log_file::LogFile;
