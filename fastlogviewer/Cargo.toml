@@ -7,13 +7,17 @@ rust-version = "1.88"
 
 [dependencies]
 fastlogviewer-core = { path = "../fastlogviewer-core" }
-iced = { version = "0.14.0", features = [
+# Defaults are off only to drop "web-colors": blending in sRGB space makes light text on the dark
+# theme thin and washed out, so text edges are blended in linear space instead.
+iced = { version = "0.14.0", default-features = false, features = [
   "canvas",
   "tokio",
   "svg",
-  "web-colors",
   "wgpu",
-  "webgl",
+  "tiny-skia",
+  "crisp",
+  "thread-pool",
+  "advanced-shaping",
 ] }
 rfd = "0.17.2"
 uuid = { version = "1.26.1", features = ["v4"] }
