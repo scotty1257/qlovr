@@ -34,3 +34,17 @@ fn copy_line_truncates_to_buffer_and_clamps_out_of_range() {
     }
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn get_line_drops_the_terminator_on_the_last_line() {
+    for content in ["alpha\nomega\n", "alpha\r\nomega\r\n"] {
+        let path = write_temp(content);
+        {
+            let f = LogFile::open(&path).unwrap();
+            f.build_index(&CancelToken::none());
+            assert_eq!("alpha", f.get_line(0, 100));
+            assert_eq!("omega", f.get_line(1, 100));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}

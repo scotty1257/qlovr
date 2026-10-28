@@ -19,11 +19,7 @@ pub struct Joined {
 
 /// Decodes a line for copying: tabs expanded the way the view shows them, no line terminator.
 pub fn copy_text_of(file: &LogFile, line: usize) -> String {
-    let mut text = file.get_line(line, COPY_LINE_BYTES);
-    // `get_line` leaves the newline on a file's last line when the file ends with one.
-    let kept = text.trim_end_matches(['\r', '\n']).len();
-    text.truncate(kept);
-    text
+    file.get_line(line, COPY_LINE_BYTES)
 }
 
 /// Joins `lines` with `\n`, stopping before the line that would take the text past `limit` bytes.

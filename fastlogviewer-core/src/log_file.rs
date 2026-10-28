@@ -205,7 +205,7 @@ impl LogFile {
     }
 
     /// Byte range of a line's content, excluding the '\n' and any '\r' before it.
-    fn line_range(&self, line: usize, strip_trailing_newline: bool) -> Option<(usize, usize)> {
+    fn line_range(&self, line: usize) -> Option<(usize, usize)> {
         let n = self.line_count();
         if line >= n {
             return None;
@@ -221,7 +221,7 @@ impl LogFile {
         // The final line has no following start to subtract from, so if the file ends in a newline
         // that byte is still inside the range — drop it explicitly.
         let bytes = self.bytes();
-        if strip_trailing_newline && e > s && bytes[e - 1] == b'\n' {
+        if e > s && bytes[e - 1] == b'\n' {
             e -= 1;
         }
         if e > s && bytes[e - 1] == b'\r' {
@@ -233,7 +233,7 @@ impl LogFile {
     /// Decodes a line to a string, truncating at `max_bytes` and expanding tabs to four spaces.
     /// Invalid UTF-8 becomes U+FFFD, matching `Encoding.UTF8.GetString`.
     pub fn get_line(&self, line: usize, max_bytes: usize) -> String {
-        let Some((s, e)) = self.line_range(line, false) else {
+        let Some((s, e)) = self.line_range(line) else {
             return String::new();
         };
         let take = (e - s).min(max_bytes);
@@ -256,7 +256,7 @@ impl LogFile {
         if dest.is_empty() {
             return 0;
         }
-        let Some((s, e)) = self.line_range(line, true) else {
+        let Some((s, e)) = self.line_range(line) else {
             return 0;
         };
         let take = (e - s).min(dest.len());
