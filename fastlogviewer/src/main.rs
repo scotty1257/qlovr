@@ -26,7 +26,10 @@ mod tag_ui;
 mod theme;
 mod win;
 
-use iced::{window, Size};
+use iced::{
+    window::{self, settings::PlatformSpecific},
+    Size,
+};
 
 fn main() -> iced::Result {
     let initial_file = std::env::args().nth(1);
@@ -34,8 +37,11 @@ fn main() -> iced::Result {
     let settings = window::Settings {
         size: Size::new(1180.0, 740.0),
         min_size: Some(Size::new(560.0, 260.0)),
-        // The same shell32 icon the C# build pulled in; a failure here just means no custom icon.
         icon: win::load_dll_icon("C:/Windows/System32/SHELL32.dll", 260),
+        platform_specific: PlatformSpecific {
+            corner_preference: window::settings::platform::CornerPreference::RoundSmall,
+            ..PlatformSpecific::default()
+        },
         ..window::Settings::default()
     };
 

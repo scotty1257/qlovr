@@ -61,8 +61,10 @@ pub const DEBUG: Color = hex(0x8A93A3);
 pub const MONO: Font = Font::with_name("JetBrains Mono");
 pub const UI: Font = Font::with_name("IBM Plex Sans");
 
-pub const MONO_SIZE: f32 = 13.0;
-pub const UI_SIZE: f32 = 13.0;
+/// Sized so a JetBrains Mono cell (0.6 em) is exactly 8px: every column then starts on a whole
+/// pixel and glyph stems land on the pixel grid instead of smearing across two pixels.
+pub const MONO_SIZE: f32 = 40.0 / 3.0;
+pub const UI_SIZE: f32 = 14.0;
 pub const SMALL_SIZE: f32 = 12.0;
 
 pub const JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
