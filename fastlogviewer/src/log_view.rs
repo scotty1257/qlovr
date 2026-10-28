@@ -354,7 +354,11 @@ impl LogView {
             return;
         }
         if self.anchor < 0 {
-            self.anchor = if self.selected >= 0 { self.selected } else { display as i64 };
+            self.anchor = if self.selected >= 0 {
+                self.selected
+            } else {
+                display as i64
+            };
         }
         self.selected = display as i64;
         self.text_sel = None;
@@ -423,7 +427,12 @@ impl LogView {
                 .chars()
                 .collect();
             let from = if display == a.display { a.col } else { 0 }.min(chars.len());
-            let to = if display == b.display { b.col } else { chars.len() }.clamp(from, chars.len());
+            let to = if display == b.display {
+                b.col
+            } else {
+                chars.len()
+            }
+            .clamp(from, chars.len());
             chars[from..to].iter().collect::<String>()
         });
         Some(join_texts(pieces, limit))
@@ -466,7 +475,10 @@ impl LogView {
         if self.mode == LogViewMode::Templates || self.wrap_all {
             return 0;
         }
-        let longest = self.file.as_ref().map_or(0, |f| f.max_line_bytes().max(0) as usize);
+        let longest = self
+            .file
+            .as_ref()
+            .map_or(0, |f| f.max_line_bytes().max(0) as usize);
         (longest + 1).saturating_sub(self.visible_cols())
     }
 
@@ -671,7 +683,11 @@ impl LogView {
         let gutter_w = self.gutter_w();
         let text_x = self.text_x();
 
-        frame.fill_rectangle(Point::ORIGIN, Size::new(gutter_w, size.height), theme::GUTTER);
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            Size::new(gutter_w, size.height),
+            theme::GUTTER,
+        );
         frame.fill_rectangle(
             Point::new(gutter_w - 1.0, 0.0),
             Size::new(1.0, size.height),
@@ -682,7 +698,10 @@ impl LogView {
         let cols = self.visible_cols() + 2;
         let wrap_cols = self.visible_cols();
         let screen_rows = self.visible_rows() + 1; // one extra so a partial last row is drawn
-        let highlight = self.matcher.as_ref().is_some_and(|m| !m.is_empty() && m.is_valid());
+        let highlight = self
+            .matcher
+            .as_ref()
+            .is_some_and(|m| !m.is_empty() && m.is_valid());
         let mut ranges: Vec<i32> = Vec::with_capacity(64);
         let mut tag_ranges: Vec<i32> = Vec::with_capacity(32);
         let mut ink: Vec<Color> = Vec::new();
@@ -729,10 +748,18 @@ impl LogView {
             // A level-coloured tick at the gutter's edge makes errors findable while scrolling.
             if let Some((_, _, color)) = level.filter(|l| l.2 == theme::ERROR || l.2 == theme::WARN)
             {
-                frame.fill_rectangle(Point::new(0.0, y + 2.0), Size::new(3.0, height - 4.0), color);
+                frame.fill_rectangle(
+                    Point::new(0.0, y + 2.0),
+                    Size::new(3.0, height - 4.0),
+                    color,
+                );
             }
             if is_selected {
-                frame.fill_rectangle(Point::new(gutter_w, y), Size::new(2.0, height), theme::ACCENT);
+                frame.fill_rectangle(
+                    Point::new(gutter_w, y),
+                    Size::new(2.0, height),
+                    theme::ACCENT,
+                );
             }
 
             // Notes: a dot for a line note, a ring for a pattern note, a faint "+" on hover to
@@ -766,7 +793,11 @@ impl LogView {
             frame.fill_text(Text {
                 content: (line + 1).to_string(),
                 position: Point::new(gutter_w - GUTTER_PAD, y + ROW_H / 2.0),
-                color: if is_selected { theme::TEXT_DIM } else { theme::TEXT_FAINT },
+                color: if is_selected {
+                    theme::TEXT_DIM
+                } else {
+                    theme::TEXT_FAINT
+                },
                 size: Pixels(theme::MONO_SIZE),
                 font: theme::MONO,
                 align_x: Alignment::Right,
@@ -798,11 +829,19 @@ impl LogView {
             if let Some((start, len, color)) = level {
                 paint(start as i32, len as i32, color);
             }
-            let match_fg = if is_current { theme::CUR_FG } else { theme::MATCH_FG };
+            let match_fg = if is_current {
+                theme::CUR_FG
+            } else {
+                theme::MATCH_FG
+            };
             for pair in ranges.chunks_exact(2) {
                 paint(pair[0], pair[1], match_fg);
             }
-            let match_bg = if is_current { theme::CUR_BG } else { theme::MATCH_BG };
+            let match_bg = if is_current {
+                theme::CUR_BG
+            } else {
+                theme::MATCH_BG
+            };
 
             for piece in 0..pieces {
                 let y = y + piece as f32 * ROW_H;
@@ -813,7 +852,9 @@ impl LogView {
                     if !tag.highlight_on {
                         continue;
                     }
-                    let Some(matcher) = &tag.matcher else { continue };
+                    let Some(matcher) = &tag.matcher else {
+                        continue;
+                    };
                     if matcher.is_empty() || !matcher.is_valid() {
                         continue;
                     }
@@ -836,7 +877,11 @@ impl LogView {
                     text_sel.filter(|(a, b)| (a.display..=b.display).contains(&display))
                 {
                     let from = if display == a.display { a.col } else { 0 };
-                    let to = if display == b.display { b.col } else { chars.len() };
+                    let to = if display == b.display {
+                        b.col
+                    } else {
+                        chars.len()
+                    };
                     if to > from {
                         let pair = [from as i32, (to - from) as i32];
                         let brush = theme::alpha(theme::ACCENT, 0.35);
@@ -956,9 +1001,19 @@ impl LogView {
         let gutter_w = self.gutter_w();
         let text_x = self.text_x();
         let cols = self.visible_cols();
-        let busiest = self.templates.iter().map(|t| t.count()).max().unwrap_or(1).max(1);
+        let busiest = self
+            .templates
+            .iter()
+            .map(|t| t.count())
+            .max()
+            .unwrap_or(1)
+            .max(1);
 
-        frame.fill_rectangle(Point::ORIGIN, Size::new(gutter_w, size.height), theme::GUTTER);
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            Size::new(gutter_w, size.height),
+            theme::GUTTER,
+        );
         frame.fill_rectangle(
             Point::new(gutter_w - 1.0, 0.0),
             Size::new(1.0, size.height),
@@ -981,7 +1036,11 @@ impl LogView {
                     Size::new(size.width - gutter_w, ROW_H),
                     theme::SEL_BG,
                 );
-                frame.fill_rectangle(Point::new(gutter_w, y), Size::new(2.0, ROW_H), theme::ACCENT);
+                frame.fill_rectangle(
+                    Point::new(gutter_w, y),
+                    Size::new(2.0, ROW_H),
+                    theme::ACCENT,
+                );
             } else if hover_row == Some(i) {
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
@@ -1014,7 +1073,11 @@ impl LogView {
             });
 
             let rendered = template.render();
-            let text = if rare { format!("★ {rendered}") } else { rendered };
+            let text = if rare {
+                format!("★ {rendered}")
+            } else {
+                rendered
+            };
             frame.fill_text(Text {
                 content: text.chars().take(cols).collect(),
                 position: Point::new(text_x, y + ROW_H / 2.0),
@@ -1031,7 +1094,10 @@ impl LogView {
         let size = self.viewport.get();
         let count = self.display_count();
 
-        let v_track = Rectangle::new(Point::new(size.width, 0.0), Size::new(SCROLLBAR, size.height));
+        let v_track = Rectangle::new(
+            Point::new(size.width, 0.0),
+            Size::new(SCROLLBAR, size.height),
+        );
         frame.fill_rectangle(v_track.position(), v_track.size(), theme::BG);
         frame.fill_rectangle(
             Point::new(size.width, 0.0),
@@ -1061,8 +1127,13 @@ impl LogView {
             }
         }
 
-        if let Some(thumb) = v_thumb(count, self.visible_rows(), self.max_top(), self.top, v_track)
-        {
+        if let Some(thumb) = v_thumb(
+            count,
+            self.visible_rows(),
+            self.max_top(),
+            self.top,
+            v_track,
+        ) {
             let hot = state.drag.is_some_and(|d| d.vertical) || state.hot == Some(true);
             fill_thumb(frame, thumb, hot, true);
         }
@@ -1093,7 +1164,10 @@ impl LogView {
         if self.mode == LogViewMode::Templates {
             return self.top + screen_row;
         }
-        self.row_lines.borrow().get(screen_row).map_or(usize::MAX, |r| r.0)
+        self.row_lines
+            .borrow()
+            .get(screen_row)
+            .map_or(usize::MAX, |r| r.0)
     }
 
     /// The character position nearest `point`, clamped to the drawn rows so a drag past the top
@@ -1119,13 +1193,25 @@ impl LogView {
 fn fill_thumb(frame: &mut Frame, thumb: Rectangle, hot: bool, vertical: bool) {
     let inset = if hot { 2.0 } else { 3.0 };
     let rect = if vertical {
-        Rectangle { x: thumb.x + inset, width: thumb.width - inset * 2.0, ..thumb }
+        Rectangle {
+            x: thumb.x + inset,
+            width: thumb.width - inset * 2.0,
+            ..thumb
+        }
     } else {
-        Rectangle { y: thumb.y + inset, height: thumb.height - inset * 2.0, ..thumb }
+        Rectangle {
+            y: thumb.y + inset,
+            height: thumb.height - inset * 2.0,
+            ..thumb
+        }
     };
     frame.fill(
         &Path::rounded_rectangle(rect.position(), rect.size(), 999.0.into()),
-        if hot { theme::TEXT_DIM } else { theme::BORDER_STRONG },
+        if hot {
+            theme::TEXT_DIM
+        } else {
+            theme::BORDER_STRONG
+        },
     );
 }
 
@@ -1140,9 +1226,13 @@ fn v_thumb(
     if max_top == 0 || track.height <= 0.0 {
         return None;
     }
-    let len = (track.height * rows as f32 / count as f32).clamp(MIN_THUMB.min(track.height), track.height);
+    let len = (track.height * rows as f32 / count as f32)
+        .clamp(MIN_THUMB.min(track.height), track.height);
     let pos = (track.height - len) * top as f32 / max_top as f32;
-    Some(Rectangle::new(Point::new(track.x, track.y + pos), Size::new(track.width, len)))
+    Some(Rectangle::new(
+        Point::new(track.x, track.y + pos),
+        Size::new(track.width, len),
+    ))
 }
 
 fn h_thumb(max_left: usize, cols: usize, left: usize, track: Rectangle) -> Option<Rectangle> {
@@ -1150,9 +1240,13 @@ fn h_thumb(max_left: usize, cols: usize, left: usize, track: Rectangle) -> Optio
         return None;
     }
     let total = max_left + cols;
-    let len = (track.width * cols as f32 / total as f32).clamp(MIN_THUMB.min(track.width), track.width);
+    let len =
+        (track.width * cols as f32 / total as f32).clamp(MIN_THUMB.min(track.width), track.width);
     let pos = (track.width - len) * left as f32 / max_left as f32;
-    Some(Rectangle::new(Point::new(track.x + pos, track.y), Size::new(len, track.height)))
+    Some(Rectangle::new(
+        Point::new(track.x + pos, track.y),
+        Size::new(len, track.height),
+    ))
 }
 
 /// Length in chars of a leading timestamp — a first token that starts with a digit and holds a
@@ -1169,7 +1263,12 @@ fn timestamp_len(line: &str) -> Option<usize> {
 fn level_span(line: &str) -> Option<(usize, usize, Color)> {
     let mut start: Option<usize> = None;
     let mut word = String::new();
-    for (i, c) in line.chars().take(96).chain(std::iter::once(' ')).enumerate() {
+    for (i, c) in line
+        .chars()
+        .take(96)
+        .chain(std::iter::once(' '))
+        .enumerate()
+    {
         if c.is_ascii_uppercase() {
             if start.is_none() {
                 start = Some(i);
@@ -1231,7 +1330,10 @@ impl canvas::Program<ViewMessage> for LogView {
             (bounds.width - SCROLLBAR).max(0.0),
             (bounds.height - SCROLLBAR).max(0.0),
         );
-        let v_track = Rectangle::new(Point::new(size.width, 0.0), Size::new(SCROLLBAR, size.height));
+        let v_track = Rectangle::new(
+            Point::new(size.width, 0.0),
+            Size::new(SCROLLBAR, size.height),
+        );
         let h_track = Rectangle::new(
             Point::new(self.text_x(), size.height),
             Size::new((size.width - self.text_x()).max(0.0), SCROLLBAR),
@@ -1247,21 +1349,35 @@ impl canvas::Program<ViewMessage> for LogView {
                 if v_track.contains(p) {
                     let thumb = v_thumb(count, rows, max_top, self.top, v_track)?;
                     if thumb.contains(p) {
-                        state.drag = Some(Drag { vertical: true, grab: p.y - thumb.y });
+                        state.drag = Some(Drag {
+                            vertical: true,
+                            grab: p.y - thumb.y,
+                        });
                         return Some(Action::request_redraw().and_capture());
                     }
                     // Clicking the track outside the thumb pages by one screenful.
-                    let page = if p.y < thumb.y { -(rows as i64) } else { rows as i64 };
+                    let page = if p.y < thumb.y {
+                        -(rows as i64)
+                    } else {
+                        rows as i64
+                    };
                     return Some(Action::publish(ViewMessage::ScrollRows(page)).and_capture());
                 }
                 if h_track.contains(p) {
                     let cols = self.visible_cols();
                     let thumb = h_thumb(self.max_left(), cols, self.left_col, h_track)?;
                     if thumb.contains(p) {
-                        state.drag = Some(Drag { vertical: false, grab: p.x - thumb.x });
+                        state.drag = Some(Drag {
+                            vertical: false,
+                            grab: p.x - thumb.x,
+                        });
                         return Some(Action::request_redraw().and_capture());
                     }
-                    let page = if p.x < thumb.x { -(cols as i64) } else { cols as i64 };
+                    let page = if p.x < thumb.x {
+                        -(cols as i64)
+                    } else {
+                        cols as i64
+                    };
                     return Some(Action::publish(ViewMessage::ScrollCols(page)).and_capture());
                 }
                 if !content.contains(p) {
@@ -1406,14 +1522,16 @@ impl canvas::Program<ViewMessage> for LogView {
         if self.mode == LogViewMode::Lines && over_marker && state.press.is_none() {
             return mouse::Interaction::Pointer;
         }
-        let over_text = cursor.position_in(bounds).is_some_and(|p| {
-            p.x >= self.text_x() && p.x < size.width && p.y < size.height
-        });
+        let over_text = cursor
+            .position_in(bounds)
+            .is_some_and(|p| p.x >= self.text_x() && p.x < size.width && p.y < size.height);
         if self.mode == LogViewMode::Lines && (over_text || state.press.is_some()) {
             return mouse::Interaction::Text;
         }
         if self.mode == LogViewMode::Templates
-            && cursor.position_in(bounds).is_some_and(|p| self.row_at(p) < self.templates.len())
+            && cursor
+                .position_in(bounds)
+                .is_some_and(|p| self.row_at(p) < self.templates.len())
             && state.hot.is_none()
         {
             return mouse::Interaction::Pointer;

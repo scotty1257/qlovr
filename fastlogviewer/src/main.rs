@@ -28,7 +28,7 @@ mod win;
 
 use iced::{
     window::{self, settings::PlatformSpecific},
-    Size,
+    Program, Size,
 };
 
 fn main() -> iced::Result {
