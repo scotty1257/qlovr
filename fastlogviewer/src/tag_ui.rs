@@ -2,8 +2,7 @@
 
 use fastlogviewer_core::{Matcher, TagDef, TAG_PALETTE};
 use iced::widget::{
-    button, center, checkbox, column, container, opaque, row, space, text, text_input, tooltip,
-    Id,
+    button, center, checkbox, column, container, opaque, row, space, text, text_input, tooltip, Id,
 };
 use iced::{Alignment, Color, Element, Length};
 use uuid::Uuid;
@@ -64,7 +63,10 @@ pub fn tag_chip<'a, Message: Clone + 'a>(
 
     let label = button(
         row![
-            container(space()).width(8).height(8).style(theme::dot(color)),
+            container(space())
+                .width(8)
+                .height(8)
+                .style(theme::dot(color)),
             text(&tag.label).size(theme::SMALL_SIZE),
         ]
         .spacing(7)
@@ -112,7 +114,10 @@ pub fn modal<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Eleme
 }
 
 fn field_label<'a, Message: 'a>(label: &'a str) -> Element<'a, Message> {
-    text(label).size(theme::SMALL_SIZE).color(theme::TEXT_DIM).into()
+    text(label)
+        .size(theme::SMALL_SIZE)
+        .color(theme::palette().text_dim)
+        .into()
 }
 
 fn dialog_buttons<'a, Message: Clone + 'a>(
@@ -139,7 +144,11 @@ fn dialog_card<'a, Message: 'a>(
     width: f32,
     body: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    container(body).width(width).padding(22).style(theme::card).into()
+    container(body)
+        .width(width)
+        .padding(22)
+        .style(theme::card)
+        .into()
 }
 
 // --------------------------------------------------------------- TagEditPopup
@@ -244,7 +253,11 @@ impl TagEditPopup {
     }
 
     pub fn view(&self) -> Element<'_, PopupMessage> {
-        let title = if self.editing.is_none() { "New tag" } else { "Edit tag" };
+        let title = if self.editing.is_none() {
+            "New tag"
+        } else {
+            "Edit tag"
+        };
         let error = self.matcher().error.clone().unwrap_or_default();
         let accept = self.can_accept().then_some(PopupMessage::Accept);
 
@@ -274,7 +287,10 @@ impl TagEditPopup {
             button(space())
                 .width(22)
                 .height(22)
-                .style(theme::swatch(Color::from_rgb8(*r, *g, *b), i == self.color_index))
+                .style(theme::swatch(
+                    Color::from_rgb8(*r, *g, *b),
+                    i == self.color_index,
+                ))
                 .on_press(PopupMessage::Color(i))
                 .into()
         }))
@@ -336,7 +352,9 @@ impl TagEditPopup {
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
-                text(error).size(theme::SMALL_SIZE).color(theme::ERROR),
+                text(error)
+                    .size(theme::SMALL_SIZE)
+                    .color(theme::palette().error),
             ]
             .spacing(6),
             checkbox_row,
@@ -344,7 +362,11 @@ impl TagEditPopup {
             column![field_label("Colour"), swatches].spacing(8),
             space().height(2),
             dialog_buttons(
-                if self.editing.is_none() { "Add tag" } else { "Save" },
+                if self.editing.is_none() {
+                    "Add tag"
+                } else {
+                    "Save"
+                },
                 accept,
                 PopupMessage::Cancel,
             ),
@@ -367,14 +389,17 @@ pub enum GotoMessage {
 pub fn goto_view(input: &str, line_count: usize) -> Element<'_, GotoMessage> {
     let body = column![
         text("Go to line").size(17),
-        text_input(&format!("1 – {}", crate::format::thousands(line_count as u64)), input)
-            .id(GOTO_INPUT)
-            .on_input(GotoMessage::Input)
-            .on_submit(GotoMessage::Go)
-            .font(theme::MONO)
-            .padding([8, 10])
-            .size(theme::MONO_SIZE)
-            .style(theme::input),
+        text_input(
+            &format!("1 – {}", crate::format::thousands(line_count as u64)),
+            input
+        )
+        .id(GOTO_INPUT)
+        .on_input(GotoMessage::Input)
+        .on_submit(GotoMessage::Go)
+        .font(theme::MONO)
+        .padding([8, 10])
+        .size(theme::MONO_SIZE)
+        .style(theme::input),
         dialog_buttons("Go", Some(GotoMessage::Go), GotoMessage::Cancel),
     ]
     .spacing(16);
@@ -414,7 +439,9 @@ pub fn copy_view<'a>(
             row![
                 text(label).size(theme::UI_SIZE),
                 space().width(Length::Fill),
-                text(hint).size(theme::SMALL_SIZE).color(theme::TEXT_FAINT),
+                text(hint)
+                    .size(theme::SMALL_SIZE)
+                    .color(theme::palette().text_faint),
             ]
             .align_y(Alignment::Center),
         )
@@ -445,11 +472,7 @@ pub fn copy_view<'a>(
                 "Ctrl+C",
                 choices.has_text.then_some(CopyMessage::Selection),
             ),
-            choice(
-                line_label,
-                "",
-                choices.line.map(|_| CopyMessage::Line)
-            ),
+            choice(line_label, "", choices.line.map(|_| CopyMessage::Line)),
             choice(
                 lines_label,
                 "Shift+click",
@@ -460,17 +483,14 @@ pub fn copy_view<'a>(
         column![
             field_label("Line range"),
             row![
-                text_input(
-                    &format!("from-to, e.g. 1-{}", line_count.min(100)),
-                    range
-                )
-                .id(COPY_RANGE_INPUT)
-                .on_input(CopyMessage::RangeInput)
-                .on_submit(CopyMessage::Range)
-                .font(theme::MONO)
-                .padding([8, 10])
-                .size(theme::MONO_SIZE)
-                .style(theme::input),
+                text_input(&format!("from-to, e.g. 1-{}", line_count.min(100)), range)
+                    .id(COPY_RANGE_INPUT)
+                    .on_input(CopyMessage::RangeInput)
+                    .on_submit(CopyMessage::Range)
+                    .font(theme::MONO)
+                    .padding([8, 10])
+                    .size(theme::MONO_SIZE)
+                    .style(theme::input),
                 button(text("Copy range").size(theme::UI_SIZE))
                     .padding([8, 14])
                     .style(theme::primary)
@@ -480,7 +500,7 @@ pub fn copy_view<'a>(
             .align_y(Alignment::Center),
             text(error.unwrap_or(""))
                 .size(theme::SMALL_SIZE)
-                .color(theme::ERROR),
+                .color(theme::palette().error),
         ]
         .spacing(6),
         row![

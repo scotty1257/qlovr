@@ -196,6 +196,7 @@ pub enum Message {
     /// can race the subscription that would see it, so the first focus counts too.
     WindowShown(window::Id),
     WindowReady(u64),
+    ToggleTheme,
 }
 
 pub struct App {
@@ -276,6 +277,8 @@ pub struct App {
     columns_for: usize,
 
     chrome_applied: bool,
+    /// The HWND, kept so switching themes can retint the title bar.
+    window_handle: Option<u64>,
 }
 
 impl App {
@@ -340,6 +343,7 @@ impl App {
             columns_wanted: false,
             columns_for: 0,
             chrome_applied: false,
+            window_handle: None,
         };
 
         app.tag_store.load();
@@ -2129,10 +2133,22 @@ impl App {
             }
             Message::WindowShown(_) => {}
             Message::WindowReady(handle) => {
-                win::apply_chrome(handle, theme::SURFACE, theme::TEXT_DIM)
+                self.window_handle = Some(handle);
+                self.apply_chrome();
+            }
+            Message::ToggleTheme => {
+                theme::set_light(!theme::is_light());
+                self.apply_chrome();
             }
         }
         Task::none()
+    }
+
+    fn apply_chrome(&self) {
+        if let Some(handle) = self.window_handle {
+            let p = theme::palette();
+            win::apply_chrome(handle, !theme::is_light(), p.surface, p.text_dim);
+        }
     }
 
     fn close_goto(&mut self) {
@@ -2332,7 +2348,7 @@ impl App {
         let has_file = self.file.is_some();
 
         let open = with_tip(
-            button(icon(icons::FOLDER, 16.0, theme::TEXT_DIM))
+            button(icon(icons::FOLDER, 16.0, theme::palette().text_dim))
                 .padding(8)
                 .style(theme::ghost)
                 .on_press(Message::OpenDialog),
@@ -2342,7 +2358,7 @@ impl App {
 
         let jump = |bytes: &'static [u8], message: Message, tip: &'static str| {
             with_tip(
-                button(icon(bytes, 16.0, theme::TEXT_DIM))
+                button(icon(bytes, 16.0, theme::palette().text_dim))
                     .padding(8)
                     .style(theme::ghost)
                     .on_press_maybe(has_file.then_some(message)),
@@ -2384,13 +2400,13 @@ impl App {
         let count = text(&self.count_text)
             .size(theme::SMALL_SIZE)
             .color(if self.count_error {
-                theme::ERROR
+                theme::palette().error
             } else {
-                theme::TEXT_DIM
+                theme::palette().text_dim
             });
         let search = stack![
             input,
-            container(icon(icons::SEARCH, 15.0, theme::TEXT_FAINT))
+            container(icon(icons::SEARCH, 15.0, theme::palette().text_faint))
                 .padding([0, 12])
                 .height(Length::Fill)
                 .align_y(Alignment::Center),
@@ -2462,9 +2478,9 @@ impl App {
                         icons::LAYERS,
                         14.0,
                         if patterns_on {
-                            theme::ACCENT
+                            theme::palette().accent
                         } else {
-                            theme::TEXT_DIM
+                            theme::palette().text_dim
                         }
                     ),
                     text("Patterns").size(theme::UI_SIZE),
@@ -2509,7 +2525,7 @@ impl App {
                 button(
                     container(text(label).size(theme::SMALL_SIZE))
                         .padding([3, 9])
-                        .style(theme::pill(theme::WARN)),
+                        .style(theme::pill(theme::palette().warn)),
                 )
                 .padding(0)
                 .style(theme::ghost)
@@ -2534,10 +2550,35 @@ impl App {
             tooltip::Position::Bottom,
         );
 
+        let (theme_icon, theme_tip) = if theme::is_light() {
+            (icons::MOON, "Switch to the dark theme")
+        } else {
+            (icons::SUN, "Switch to the light theme")
+        };
+        let theme_toggle = with_tip(
+            button(icon(theme_icon, 16.0, theme::palette().text_dim))
+                .padding(8)
+                .style(theme::ghost)
+                .on_press(Message::ToggleTheme),
+            theme_tip,
+            tooltip::Position::Bottom,
+        );
+
         container(
-            row![tools, top, bottom, copy, search, options, wrap, columns, patterns]
-                .spacing(8)
-                .align_y(Alignment::Center),
+            row![
+                tools,
+                top,
+                bottom,
+                copy,
+                search,
+                options,
+                wrap,
+                columns,
+                patterns,
+                theme_toggle
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         )
         .padding([10, 12])
         .width(Length::Fill)
@@ -2546,7 +2587,7 @@ impl App {
     }
 
     fn tag_bar(&self) -> Element<'_, Message> {
-        let mut chips = row![text("TAGS").size(10.5).color(theme::TEXT_FAINT)]
+        let mut chips = row![text("TAGS").size(10.5).color(theme::palette().text_faint)]
             .spacing(6)
             .align_y(Alignment::Center)
             .padding([0, 12]);
@@ -2557,7 +2598,7 @@ impl App {
         chips = chips.push(with_tip(
             button(
                 row![
-                    icon(icons::PLUS, 12.0, theme::TEXT_DIM),
+                    icon(icons::PLUS, 12.0, theme::palette().text_dim),
                     text("New tag").size(theme::SMALL_SIZE),
                 ]
                 .spacing(5)
@@ -2612,9 +2653,13 @@ impl App {
         let pill = |label: &'static str| {
             container(text(label).size(10.5))
                 .padding([2, 8])
-                .style(theme::pill(theme::ACCENT))
+                .style(theme::pill(theme::palette().accent))
         };
-        let hint = |hint: &'static str| text(hint).size(theme::SMALL_SIZE).color(theme::TEXT_FAINT);
+        let hint = |hint: &'static str| {
+            text(hint)
+                .size(theme::SMALL_SIZE)
+                .color(theme::palette().text_faint)
+        };
 
         let content = if self.view.mode() == LogViewMode::Templates {
             let count = self.templates.as_ref().map_or(0, |t| t.template_count());
@@ -2625,7 +2670,7 @@ impl App {
                     thousands(count as u64)
                 ))
                 .size(theme::SMALL_SIZE)
-                .color(theme::TEXT_DIM),
+                .color(theme::palette().text_dim),
                 space().width(Length::Fill),
                 hint("↑↓ select  ·  Enter show lines  ·  Esc back"),
             ]
@@ -2654,18 +2699,18 @@ impl App {
 
     fn status_bar(&self) -> Element<'_, Message> {
         let dot = if self.busy {
-            theme::ACCENT
+            theme::palette().accent
         } else if self.file.is_some() {
-            theme::INFO
+            theme::palette().info
         } else {
-            theme::TEXT_FAINT
+            theme::palette().text_faint
         };
 
         let mut bar = row!(
             container(space()).width(7).height(7).style(theme::dot(dot)),
             text(&self.status_left)
                 .size(theme::SMALL_SIZE)
-                .color(theme::TEXT_DIM)
+                .color(theme::palette().text_dim)
                 .wrapping(text::Wrapping::None),
         )
         .spacing(8)
@@ -2676,9 +2721,9 @@ impl App {
                     text(&notice.text)
                         .size(theme::SMALL_SIZE)
                         .color(if notice.error {
-                            theme::ERROR
+                            theme::palette().error
                         } else {
-                            theme::ACCENT
+                            theme::palette().accent
                         })
                         .wrapping(text::Wrapping::None),
                 );
@@ -2692,7 +2737,9 @@ impl App {
                     container(text(keys).font(theme::MONO).size(10.5))
                         .padding([1, 5])
                         .style(theme::kbd),
-                    text(label).size(theme::SMALL_SIZE).color(theme::TEXT_FAINT),
+                    text(label)
+                        .size(theme::SMALL_SIZE)
+                        .color(theme::palette().text_faint),
                 ]
                 .spacing(5)
                 .align_y(Alignment::Center),
@@ -2710,18 +2757,18 @@ impl App {
     fn empty_state(&self) -> Element<'_, Message> {
         center(
             column![
-                container(icon(icons::FILE, 40.0, theme::TEXT_FAINT))
+                container(icon(icons::FILE, 40.0, theme::palette().text_faint))
                     .padding(18)
                     .style(theme::segmented),
                 space().height(4),
                 text("No log file open").size(18),
                 text("Drop a file anywhere in this window, or open one to start.")
                     .size(theme::UI_SIZE)
-                    .color(theme::TEXT_DIM),
+                    .color(theme::palette().text_dim),
                 space().height(6),
                 button(
                     row![
-                        icon(icons::FOLDER, 14.0, theme::ON_ACCENT),
+                        icon(icons::FOLDER, 14.0, theme::palette().on_accent),
                         text("Open file…").size(theme::UI_SIZE),
                     ]
                     .spacing(8)
@@ -2732,7 +2779,7 @@ impl App {
                 .on_press(Message::OpenDialog),
                 text("or press Ctrl+O")
                     .size(theme::SMALL_SIZE)
-                    .color(theme::TEXT_FAINT),
+                    .color(theme::palette().text_faint),
             ]
             .spacing(10)
             .align_x(Alignment::Center),

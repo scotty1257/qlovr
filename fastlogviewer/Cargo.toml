@@ -20,6 +20,7 @@ iced = { version = "0.14.0", default-features = false, features = [
   "advanced-shaping",
 ] }
 rfd = "0.17.2"
+dirs = "7"
 uuid = { version = "1.26.1", features = ["v4"] }
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",

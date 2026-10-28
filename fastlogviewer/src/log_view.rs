@@ -686,12 +686,12 @@ impl LogView {
         frame.fill_rectangle(
             Point::ORIGIN,
             Size::new(gutter_w, size.height),
-            theme::GUTTER,
+            theme::palette().gutter,
         );
         frame.fill_rectangle(
             Point::new(gutter_w - 1.0, 0.0),
             Size::new(1.0, size.height),
-            theme::BORDER,
+            theme::palette().border,
         );
 
         let count = self.display_count();
@@ -735,18 +735,19 @@ impl LogView {
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
                     Size::new(size.width - gutter_w, height),
-                    theme::SEL_BG,
+                    theme::palette().sel_bg,
                 );
             } else if hover_row == Some(display) {
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
                     Size::new(size.width - gutter_w, height),
-                    theme::HOVER_ROW,
+                    theme::palette().hover_row,
                 );
             }
 
             // A level-coloured tick at the gutter's edge makes errors findable while scrolling.
-            if let Some((_, _, color)) = level.filter(|l| l.2 == theme::ERROR || l.2 == theme::WARN)
+            if let Some((_, _, color)) =
+                level.filter(|l| l.2 == theme::palette().error || l.2 == theme::palette().warn)
             {
                 frame.fill_rectangle(
                     Point::new(0.0, y + 2.0),
@@ -758,7 +759,7 @@ impl LogView {
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
                     Size::new(2.0, height),
-                    theme::ACCENT,
+                    theme::palette().accent,
                 );
             }
 
@@ -767,20 +768,22 @@ impl LogView {
             let (line_note, pattern_note) = self.note_marks(line);
             let center = Point::new(MARKER_W / 2.0 + 1.0, y + ROW_H / 2.0);
             if line_note {
-                frame.fill(&Path::circle(center, 3.5), theme::ACCENT);
+                frame.fill(&Path::circle(center, 3.5), theme::palette().accent);
             }
             if pattern_note {
                 let radius = if line_note { 6.0 } else { 4.0 };
                 frame.stroke(
                     &Path::circle(center, radius),
-                    Stroke::default().with_color(theme::WARN).with_width(1.5),
+                    Stroke::default()
+                        .with_color(theme::palette().warn)
+                        .with_width(1.5),
                 );
             }
             if !line_note && !pattern_note && hover_row == Some(display) {
                 frame.fill_text(Text {
                     content: "+".to_string(),
                     position: center,
-                    color: theme::TEXT_FAINT,
+                    color: theme::palette().text_faint,
                     size: Pixels(theme::MONO_SIZE),
                     font: theme::MONO,
                     align_x: Alignment::Center,
@@ -794,9 +797,9 @@ impl LogView {
                 content: (line + 1).to_string(),
                 position: Point::new(gutter_w - GUTTER_PAD, y + ROW_H / 2.0),
                 color: if is_selected {
-                    theme::TEXT_DIM
+                    theme::palette().text_dim
                 } else {
-                    theme::TEXT_FAINT
+                    theme::palette().text_faint
                 },
                 size: Pixels(theme::MONO_SIZE),
                 font: theme::MONO,
@@ -815,7 +818,7 @@ impl LogView {
 
             // Colour every character once: timestamp, level word, matches, plain text.
             ink.clear();
-            ink.resize(chars.len(), theme::TEXT);
+            ink.resize(chars.len(), theme::palette().text);
             let mut paint = |start: i32, len: i32, color: Color| {
                 let a = start.max(0) as usize;
                 let b = ((start + len).max(0) as usize).min(ink.len());
@@ -824,23 +827,23 @@ impl LogView {
                 }
             };
             if let Some(len) = timestamp_len(&full) {
-                paint(0, len as i32, theme::TEXT_DIM);
+                paint(0, len as i32, theme::palette().text_dim);
             }
             if let Some((start, len, color)) = level {
                 paint(start as i32, len as i32, color);
             }
             let match_fg = if is_current {
-                theme::CUR_FG
+                theme::palette().cur_fg
             } else {
-                theme::MATCH_FG
+                theme::palette().match_fg
             };
             for pair in ranges.chunks_exact(2) {
                 paint(pair[0], pair[1], match_fg);
             }
             let match_bg = if is_current {
-                theme::CUR_BG
+                theme::palette().cur_bg
             } else {
-                theme::MATCH_BG
+                theme::palette().match_bg
             };
 
             for piece in 0..pieces {
@@ -884,7 +887,7 @@ impl LogView {
                     };
                     if to > from {
                         let pair = [from as i32, (to - from) as i32];
-                        let brush = theme::alpha(theme::ACCENT, 0.35);
+                        let brush = theme::alpha(theme::palette().accent, 0.35);
                         self.fill_columns(frame, &pair, start, piece_len, y, brush);
                     }
                 }
@@ -924,16 +927,20 @@ impl LogView {
         };
         let size = self.viewport.get();
         let gutter_w = self.gutter_w();
-        frame.fill_rectangle(Point::ORIGIN, Size::new(size.width, ROW_H), theme::GUTTER);
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            Size::new(size.width, ROW_H),
+            theme::palette().gutter,
+        );
         frame.fill_rectangle(
             Point::new(0.0, ROW_H - 1.0),
             Size::new(size.width, 1.0),
-            theme::BORDER,
+            theme::palette().border,
         );
         frame.fill_rectangle(
             Point::new(gutter_w - 1.0, 0.0),
             Size::new(1.0, ROW_H),
-            theme::BORDER,
+            theme::palette().border,
         );
         for (header, offset) in columns.headers.iter().zip(columns.offsets()) {
             if offset < self.left_col {
@@ -945,7 +952,7 @@ impl LogView {
                     self.text_x() + (offset - self.left_col) as f32 * CHAR_W,
                     ROW_H / 2.0,
                 ),
-                color: theme::TEXT_FAINT,
+                color: theme::palette().text_faint,
                 size: Pixels(theme::SMALL_SIZE),
                 font: theme::UI,
                 align_y: Vertical::Center,
@@ -988,7 +995,7 @@ impl LogView {
             frame.fill_text(Text {
                 content: "Clustering…".to_string(),
                 position: Point::new(size.width / 2.0, size.height / 2.0),
-                color: theme::TEXT_FAINT,
+                color: theme::palette().text_faint,
                 size: Pixels(theme::UI_SIZE),
                 font: theme::UI,
                 align_x: Alignment::Center,
@@ -1012,12 +1019,12 @@ impl LogView {
         frame.fill_rectangle(
             Point::ORIGIN,
             Size::new(gutter_w, size.height),
-            theme::GUTTER,
+            theme::palette().gutter,
         );
         frame.fill_rectangle(
             Point::new(gutter_w - 1.0, 0.0),
             Size::new(1.0, size.height),
-            theme::BORDER,
+            theme::palette().border,
         );
 
         for r in 0..=self.visible_rows() {
@@ -1034,18 +1041,18 @@ impl LogView {
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
                     Size::new(size.width - gutter_w, ROW_H),
-                    theme::SEL_BG,
+                    theme::palette().sel_bg,
                 );
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
                     Size::new(2.0, ROW_H),
-                    theme::ACCENT,
+                    theme::palette().accent,
                 );
             } else if hover_row == Some(i) {
                 frame.fill_rectangle(
                     Point::new(gutter_w, y),
                     Size::new(size.width - gutter_w, ROW_H),
-                    theme::HOVER_ROW,
+                    theme::palette().hover_row,
                 );
             }
 
@@ -1057,13 +1064,24 @@ impl LogView {
                     Size::new(bar_w, ROW_H - 6.0),
                     3.0.into(),
                 ),
-                theme::alpha(if rare { theme::ACCENT } else { theme::TEXT_DIM }, 0.12),
+                theme::alpha(
+                    if rare {
+                        theme::palette().accent
+                    } else {
+                        theme::palette().text_dim
+                    },
+                    0.12,
+                ),
             );
 
             frame.fill_text(Text {
                 content: thousands(template.count() as u64),
                 position: Point::new(gutter_w - GUTTER_PAD, y + ROW_H / 2.0),
-                color: if rare { theme::ACCENT } else { theme::TEXT_DIM },
+                color: if rare {
+                    theme::palette().accent
+                } else {
+                    theme::palette().text_dim
+                },
                 size: Pixels(theme::MONO_SIZE),
                 font: theme::MONO,
                 align_x: Alignment::Right,
@@ -1081,7 +1099,11 @@ impl LogView {
             frame.fill_text(Text {
                 content: text.chars().take(cols).collect(),
                 position: Point::new(text_x, y + ROW_H / 2.0),
-                color: if rare { theme::ACCENT } else { theme::TEXT },
+                color: if rare {
+                    theme::palette().accent
+                } else {
+                    theme::palette().text
+                },
                 size: Pixels(theme::MONO_SIZE),
                 font: theme::MONO,
                 align_y: Vertical::Center,
@@ -1098,11 +1120,11 @@ impl LogView {
             Point::new(size.width, 0.0),
             Size::new(SCROLLBAR, size.height),
         );
-        frame.fill_rectangle(v_track.position(), v_track.size(), theme::BG);
+        frame.fill_rectangle(v_track.position(), v_track.size(), theme::palette().bg);
         frame.fill_rectangle(
             Point::new(size.width, 0.0),
             Size::new(1.0, size.height),
-            theme::alpha(theme::BORDER, 0.6),
+            theme::alpha(theme::palette().border, 0.6),
         );
 
         // Ticks only make sense unfiltered — filtered, every row is a match.
@@ -1120,7 +1142,7 @@ impl LogView {
                     frame.fill_rectangle(
                         Point::new(v_track.x + 3.0, y),
                         Size::new(SCROLLBAR - 6.0, 2.0),
-                        theme::TICK,
+                        theme::palette().tick,
                     );
                     i += step;
                 }
@@ -1142,7 +1164,7 @@ impl LogView {
             Point::new(0.0, size.height),
             Size::new(size.width, bounds.height - size.height),
         );
-        frame.fill_rectangle(h_track.position(), h_track.size(), theme::BG);
+        frame.fill_rectangle(h_track.position(), h_track.size(), theme::palette().bg);
         let cols = self.visible_cols();
         let h_track_text = Rectangle {
             x: self.text_x(),
@@ -1208,9 +1230,9 @@ fn fill_thumb(frame: &mut Frame, thumb: Rectangle, hot: bool, vertical: bool) {
     frame.fill(
         &Path::rounded_rectangle(rect.position(), rect.size(), 999.0.into()),
         if hot {
-            theme::TEXT_DIM
+            theme::palette().text_dim
         } else {
-            theme::BORDER_STRONG
+            theme::palette().border_strong
         },
     );
 }
@@ -1283,10 +1305,10 @@ fn level_span(line: &str) -> Option<(usize, usize, Color)> {
         }
         if let Some(s) = start.take() {
             let color = match word.as_str() {
-                "ERROR" | "ERR" | "FATAL" | "CRITICAL" | "CRIT" => theme::ERROR,
-                "WARN" | "WARNING" => theme::WARN,
-                "INFO" => theme::INFO,
-                "DEBUG" | "DBG" | "TRACE" => theme::DEBUG,
+                "ERROR" | "ERR" | "FATAL" | "CRITICAL" | "CRIT" => theme::palette().error,
+                "WARN" | "WARNING" => theme::palette().warn,
+                "INFO" => theme::palette().info,
+                "DEBUG" | "DBG" | "TRACE" => theme::palette().debug,
                 _ => continue,
             };
             return Some((s, word.len(), color));
@@ -1494,7 +1516,7 @@ impl canvas::Program<ViewMessage> for LogView {
         ));
 
         let mut frame = Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), theme::BG);
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), theme::palette().bg);
 
         if self.mode == LogViewMode::Templates {
             self.paint_templates(&mut frame, state.hover_row);

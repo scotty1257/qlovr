@@ -1,4 +1,4 @@
-//! The Win32 niceties the C# build reached for via P/Invoke: a dark title bar tinted to match the
+//! The Win32 niceties the C# build reached for via P/Invoke: a themed title bar tinted to match the
 //! toolbar, Windows 11 rounded corners, and the window icon pulled out of `shell32.dll`.
 //!
 //! Per-monitor-v2 DPI awareness is *not* here — winit already declares it and iced drives its
@@ -35,11 +35,11 @@ fn colorref(color: iced::Color) -> u32 {
     (b as u32) << 16 | (g as u32) << 8 | r as u32
 }
 
-/// Dark title bar (20 on 1903+, 19 on 1809), tinted to `caption` on Windows 11, and rounded
-/// corners. Older Windows ignores the attributes it doesn't know.
-pub fn apply_chrome(handle: u64, caption: iced::Color, caption_text: iced::Color) {
+/// Dark or light title bar (20 on 1903+, 19 on 1809), tinted to `caption` on Windows 11, and
+/// rounded corners. Older Windows ignores the attributes it doesn't know.
+pub fn apply_chrome(handle: u64, dark: bool, caption: iced::Color, caption_text: iced::Color) {
     let hwnd = to_hwnd(handle);
-    let dark: u32 = 1;
+    let dark = dark as u32;
     unsafe {
         let set = |attr: u32, value: &u32| {
             DwmSetWindowAttribute(

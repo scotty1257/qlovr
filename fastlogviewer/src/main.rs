@@ -33,6 +33,7 @@ use iced::{
 
 fn main() -> iced::Result {
     let initial_file = std::env::args().nth(1);
+    theme::load_mode();
 
     let settings = window::Settings {
         size: Size::new(1180.0, 740.0),

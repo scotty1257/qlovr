@@ -538,6 +538,7 @@ dependencies = [
 name = "fastlogviewer"
 version = "1.0.0"
 dependencies = [
+ "dirs",
  "fastlogviewer-core",
  "iced",
  "rfd",

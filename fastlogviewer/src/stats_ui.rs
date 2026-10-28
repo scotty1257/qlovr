@@ -46,7 +46,9 @@ pub struct TagStat {
 
 pub fn stats_panel(stats: Vec<TagStat>, filter_on: bool) -> Element<'static, StatsMessage> {
     let header = row![
-        text("TAG STATS").size(10.5).color(theme::TEXT_FAINT),
+        text("TAG STATS")
+            .size(10.5)
+            .color(theme::palette().text_faint),
         space().width(Length::Fill),
         button(text("×").size(14).center())
             .width(22)
@@ -62,7 +64,7 @@ pub fn stats_panel(stats: Vec<TagStat>, filter_on: bool) -> Element<'static, Sta
         body = body.push(
             text("Add a tag to see how often it matches.")
                 .size(theme::SMALL_SIZE)
-                .color(theme::TEXT_DIM),
+                .color(theme::palette().text_dim),
         );
     }
     for stat in stats {
@@ -115,7 +117,7 @@ fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
         let Some((line, stamp)) = at else {
             return text(format!("{label}  —"))
                 .size(theme::SMALL_SIZE)
-                .color(theme::TEXT_FAINT)
+                .color(theme::palette().text_faint)
                 .into();
         };
         let mut content = column![
@@ -126,7 +128,7 @@ fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
                 text(stamp)
                     .font(theme::MONO)
                     .size(10.5)
-                    .color(theme::TEXT_DIM),
+                    .color(theme::palette().text_dim),
             );
         }
         button(content)
@@ -138,7 +140,9 @@ fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
 
     column![
         title,
-        text(share).size(theme::SMALL_SIZE).color(theme::TEXT_DIM),
+        text(share)
+            .size(theme::SMALL_SIZE)
+            .color(theme::palette().text_dim),
         strip,
         row![
             end("first", stat.first),
@@ -190,7 +194,7 @@ impl canvas::Program<StatsMessage> for DensityStrip {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), theme::BG);
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), theme::palette().bg);
 
         let busiest = self.buckets.iter().copied().max().unwrap_or(0);
         if busiest > 0 {

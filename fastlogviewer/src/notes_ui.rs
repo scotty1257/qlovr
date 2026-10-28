@@ -68,7 +68,11 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
         body = body.push(dim("Placing notes on the file…"));
     }
     if let Some(reason) = panel.read_only {
-        body = body.push(text(reason).size(theme::SMALL_SIZE).color(theme::WARN));
+        body = body.push(
+            text(reason)
+                .size(theme::SMALL_SIZE)
+                .color(theme::palette().warn),
+        );
     }
     if let Some(focus) = panel.focus {
         body = body.push(focus_section(focus, panel.placing));
@@ -87,7 +91,7 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
         let entry = column![
             text(format!("Line {}", thousands(line.line as u64 + 1)))
                 .size(theme::SMALL_SIZE)
-                .color(theme::ACCENT),
+                .color(theme::palette().accent),
             text(first_line(&line.note)).size(theme::SMALL_SIZE),
         ];
         list = list.push(list_row(
@@ -98,17 +102,19 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
     }
     for (i, pattern) in panel.patterns.into_iter().enumerate() {
         let mut entry = column![row![
-            text("Pattern").size(theme::SMALL_SIZE).color(theme::WARN),
+            text("Pattern")
+                .size(theme::SMALL_SIZE)
+                .color(theme::palette().warn),
             text(pattern.status.unwrap_or(""))
                 .size(theme::SMALL_SIZE)
-                .color(theme::TEXT_FAINT),
+                .color(theme::palette().text_faint),
         ]
         .spacing(8)];
         entry = entry.push(
             text(pattern.pattern)
                 .font(theme::MONO)
                 .size(10.5)
-                .color(theme::TEXT_DIM)
+                .color(theme::palette().text_dim)
                 .wrapping(text::Wrapping::None),
         );
         entry = entry.push(text(first_line(&pattern.note)).size(theme::SMALL_SIZE));
@@ -141,7 +147,7 @@ fn focus_section<'a>(focus: Focus<'a>, placing: bool) -> Element<'a, NotesMessag
             text(line_text)
                 .font(theme::MONO)
                 .size(10.5)
-                .color(theme::TEXT_DIM)
+                .color(theme::palette().text_dim)
                 .wrapping(text::Wrapping::None),
         );
         let mut editor = text_editor(focus.line_editor)
@@ -159,7 +165,7 @@ fn focus_section<'a>(focus: Focus<'a>, placing: bool) -> Element<'a, NotesMessag
             text(pattern)
                 .font(theme::MONO)
                 .size(10.5)
-                .color(theme::TEXT_DIM)
+                .color(theme::palette().text_dim)
                 .wrapping(text::Wrapping::None),
         );
         section = section.push(
@@ -206,17 +212,23 @@ fn close_button<'a>(message: NotesMessage) -> Element<'a, NotesMessage> {
 }
 
 fn heading<'a>(label: &'static str) -> Element<'a, NotesMessage> {
-    text(label).size(10.5).color(theme::TEXT_FAINT).into()
+    text(label)
+        .size(10.5)
+        .color(theme::palette().text_faint)
+        .into()
 }
 
 fn heading_owned<'a>(label: String) -> Element<'a, NotesMessage> {
-    text(label).size(10.5).color(theme::TEXT_FAINT).into()
+    text(label)
+        .size(10.5)
+        .color(theme::palette().text_faint)
+        .into()
 }
 
 fn dim<'a>(label: &'static str) -> Element<'a, NotesMessage> {
     text(label)
         .size(theme::SMALL_SIZE)
-        .color(theme::TEXT_DIM)
+        .color(theme::palette().text_dim)
         .into()
 }
 
