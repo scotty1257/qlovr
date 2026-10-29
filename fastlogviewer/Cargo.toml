@@ -29,3 +29,4 @@ windows = { version = "0.61.3", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Shell",
 ] }
+env_logger = "0.11.11"

@@ -34,6 +34,9 @@ use iced::{
 fn main() -> iced::Result {
     // iced has no API for picking the wgpu backend; it reads this variable when it creates the adapter.
     std::env::set_var("WGPU_BACKEND", "dx12");
+    // iced_wgpu logs the adapter it picks at info level; RUST_LOG overrides this filter.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,iced_wgpu=info"))
+        .init();
 
     let initial_file = std::env::args().nth(1);
     theme::load_mode();
