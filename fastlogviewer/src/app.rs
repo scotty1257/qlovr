@@ -2742,8 +2742,21 @@ impl App {
         for (keys, label) in HINTS {
             bar = bar.push(
                 row![
-                    container(text(keys).font(theme::MONO).size(10.5))
-                        .padding([1, 5])
+                    // A whole-pixel line height keeps the box from rounding to an odd
+                    // height, and the glyph baseline snaps up a pixel, so the extra
+                    // pixel of padding goes on top to land the keys in the middle.
+                    container(
+                        text(keys)
+                            .font(theme::MONO)
+                            .size(10.5)
+                            .line_height(text::LineHeight::Absolute(12.0.into())),
+                    )
+                    .padding(Padding {
+                        top: 2.0,
+                        bottom: 0.0,
+                        left: 5.0,
+                        right: 5.0,
+                    })
                         .style(theme::kbd),
                     text(label)
                         .size(theme::SMALL_SIZE)

@@ -4,7 +4,7 @@ use fastlogviewer_core::{Matcher, TagDef, TAG_PALETTE};
 use iced::widget::{
     button, center, checkbox, column, container, opaque, row, space, text, text_input, tooltip, Id,
 };
-use iced::{Alignment, Color, Element, Length};
+use iced::{Alignment, Color, Element, Length, Padding};
 use uuid::Uuid;
 
 use crate::theme;
@@ -53,10 +53,15 @@ pub fn tag_chip<'a, Message: Clone + 'a>(
 ) -> Element<'a, Message> {
     let color = tag_color(tag);
     let switch = |label: &'static str, on: bool, implied: bool, action: ChipAction| {
+        // The glyph baseline snaps up to a whole pixel, leaving capitals 1px high; the top
+        // padding drops them back to the centre of the box.
         button(text(label).size(11).font(theme::MONO).center())
             .width(20)
             .height(20)
-            .padding(0)
+            .padding(Padding {
+                top: 1.0,
+                ..Padding::ZERO
+            })
             .style(theme::chip_switch(on, implied, color))
             .on_press(on_action(tag.id, action))
     };
