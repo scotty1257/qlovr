@@ -64,6 +64,7 @@ pub fn stats_panel(stats: Vec<TagStat>, filter_on: bool) -> Element<'static, Sta
         body = body.push(
             text("Add a tag to see how often it matches.")
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().text_dim),
         );
     }
@@ -117,11 +118,14 @@ fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
         let Some((line, stamp)) = at else {
             return text(format!("{label}  —"))
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().text_faint)
                 .into();
         };
         let mut content = column![
-            text(format!("{label}  line {}", thousands(line as u64 + 1))).size(theme::SMALL_SIZE)
+            text(format!("{label}  line {}", thousands(line as u64 + 1)))
+                .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
         ];
         if !stamp.is_empty() {
             content = content.push(
@@ -142,6 +146,7 @@ fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
         title,
         text(share)
             .size(theme::SMALL_SIZE)
+            .font(theme::UI_SMALL)
             .color(theme::palette().text_dim),
         strip,
         row![

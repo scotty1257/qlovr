@@ -2399,6 +2399,7 @@ impl App {
             .style(theme::input);
         let count = text(&self.count_text)
             .size(theme::SMALL_SIZE)
+            .font(theme::UI_SMALL)
             .color(if self.count_error {
                 theme::palette().error
             } else {
@@ -2523,7 +2524,7 @@ impl App {
         } {
             tools = tools.push(with_tip(
                 button(
-                    container(text(label).size(theme::SMALL_SIZE))
+                    container(text(label).size(theme::SMALL_SIZE).font(theme::UI_SMALL))
                         .padding([3, 9])
                         .style(theme::pill(theme::palette().warn)),
                 )
@@ -2599,7 +2600,9 @@ impl App {
             button(
                 row![
                     icon(icons::PLUS, 12.0, theme::palette().text_dim),
-                    text("New tag").size(theme::SMALL_SIZE),
+                    text("New tag")
+                        .size(theme::SMALL_SIZE)
+                        .font(theme::UI_SMALL),
                 ]
                 .spacing(5)
                 .align_y(Alignment::Center),
@@ -2612,7 +2615,7 @@ impl App {
         ));
         let stats_on = self.side_panel == Some(SidePanel::Stats);
         chips = chips.push(with_tip(
-            button(text("Stats").size(theme::SMALL_SIZE))
+            button(text("Stats").size(theme::SMALL_SIZE).font(theme::UI_SMALL))
                 .padding([4, 10])
                 .style(theme::toggle(stats_on))
                 .on_press_maybe(self.file.is_some().then_some(Message::ToggleStats)),
@@ -2628,7 +2631,8 @@ impl App {
                 } else {
                     "Notes".to_string()
                 })
-                .size(theme::SMALL_SIZE),
+                .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL),
             )
             .padding([4, 10])
             .style(theme::toggle(notes_on))
@@ -2658,6 +2662,7 @@ impl App {
         let hint = |hint: &'static str| {
             text(hint)
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().text_faint)
         };
 
@@ -2670,6 +2675,7 @@ impl App {
                     thousands(count as u64)
                 ))
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().text_dim),
                 space().width(Length::Fill),
                 hint("↑↓ select  ·  Enter show lines  ·  Esc back"),
@@ -2710,6 +2716,7 @@ impl App {
             container(space()).width(7).height(7).style(theme::dot(dot)),
             text(&self.status_left)
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().text_dim)
                 .wrapping(text::Wrapping::None),
         )
@@ -2720,6 +2727,7 @@ impl App {
                 bar = bar.push(
                     text(&notice.text)
                         .size(theme::SMALL_SIZE)
+                        .font(theme::UI_SMALL)
                         .color(if notice.error {
                             theme::palette().error
                         } else {
@@ -2739,6 +2747,7 @@ impl App {
                         .style(theme::kbd),
                     text(label)
                         .size(theme::SMALL_SIZE)
+                        .font(theme::UI_SMALL)
                         .color(theme::palette().text_faint),
                 ]
                 .spacing(5)
@@ -2779,6 +2788,7 @@ impl App {
                 .on_press(Message::OpenDialog),
                 text("or press Ctrl+O")
                     .size(theme::SMALL_SIZE)
+                    .font(theme::UI_SMALL)
                     .color(theme::palette().text_faint),
             ]
             .spacing(10)

@@ -71,7 +71,7 @@ them with a 50 ms tick, but only while something is still running.
 - **Keyboard routing.** All key presses arrive through `event::listen_with`. Global shortcuts are
   handled first. Keys a focused text input already consumed (`Status::Captured`) never reach the
   log, which matches the WinForms split between `ProcessCmdKey` and `LogView.OnKeyDown`.
-- **Character width is fixed at `0.6 × font size`**, JetBrains Mono's real advance width.
+- **Character width is fixed at `0.6 × font size`**, Ioskeley Mono's real advance width.
   Highlights are placed by column, so this must be exact.
 - **Each line is drawn as runs of a single colour** (timestamp, level, matches, plain text), so no
   glyph is ever drawn twice.

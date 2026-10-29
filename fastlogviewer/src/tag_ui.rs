@@ -34,7 +34,7 @@ pub fn with_tip<'a, Message: 'a>(
 ) -> Element<'a, Message> {
     tooltip(
         content,
-        container(text(tip).size(theme::SMALL_SIZE))
+        container(text(tip).size(theme::SMALL_SIZE).font(theme::UI_SMALL))
             .padding([4, 8])
             .style(theme::tooltip),
         position,
@@ -67,7 +67,9 @@ pub fn tag_chip<'a, Message: Clone + 'a>(
                 .width(8)
                 .height(8)
                 .style(theme::dot(color)),
-            text(&tag.label).size(theme::SMALL_SIZE),
+            text(&tag.label)
+                .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL),
         ]
         .spacing(7)
         .align_y(Alignment::Center),
@@ -116,6 +118,7 @@ pub fn modal<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Eleme
 fn field_label<'a, Message: 'a>(label: &'a str) -> Element<'a, Message> {
     text(label)
         .size(theme::SMALL_SIZE)
+        .font(theme::UI_SMALL)
         .color(theme::palette().text_dim)
         .into()
 }
@@ -325,12 +328,17 @@ impl TagEditPopup {
 
         // Only a saved tag has a place in the tag bar to move.
         let move_button = |label: &'static str, delta: i64| {
-            button(text(label).size(theme::SMALL_SIZE).center())
-                .width(30)
-                .height(26)
-                .padding(0)
-                .style(theme::secondary)
-                .on_press_maybe(self.editing.map(|_| PopupMessage::Move(delta)))
+            button(
+                text(label)
+                    .size(theme::SMALL_SIZE)
+                    .font(theme::UI_SMALL)
+                    .center(),
+            )
+            .width(30)
+            .height(26)
+            .padding(0)
+            .style(theme::secondary)
+            .on_press_maybe(self.editing.map(|_| PopupMessage::Move(delta)))
         };
         let position_row = row![
             field_label("Position in tag bar"),
@@ -354,6 +362,7 @@ impl TagEditPopup {
                 .align_y(Alignment::Center),
                 text(error)
                     .size(theme::SMALL_SIZE)
+                    .font(theme::UI_SMALL)
                     .color(theme::palette().error),
             ]
             .spacing(6),
@@ -441,6 +450,7 @@ pub fn copy_view<'a>(
                 space().width(Length::Fill),
                 text(hint)
                     .size(theme::SMALL_SIZE)
+                    .font(theme::UI_SMALL)
                     .color(theme::palette().text_faint),
             ]
             .align_y(Alignment::Center),
@@ -500,6 +510,7 @@ pub fn copy_view<'a>(
             .align_y(Alignment::Center),
             text(error.unwrap_or(""))
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().error),
         ]
         .spacing(6),

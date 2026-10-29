@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use iced::border::Radius;
+use iced::font::Weight;
 use iced::widget::{button, checkbox, container, svg, text_input};
 use iced::{Background, Border, Color, Font, Shadow, Theme, Vector};
 
@@ -181,17 +182,25 @@ pub fn set_light(light: bool) {
     let _ = std::fs::write(path, if light { "light" } else { "dark" });
 }
 
-pub const MONO: Font = Font::with_name("JetBrains Mono");
+pub const MONO: Font = Font::with_name("IoskeleyMonoNL Nerd Font Mono");
 pub const UI: Font = Font::with_name("IBM Plex Sans");
+/// Small UI text is set a weight up: Regular at 13px draws thin, washed-out strokes.
+pub const UI_SMALL: Font = Font {
+    weight: Weight::Medium,
+    ..UI
+};
 
-/// Sized so a JetBrains Mono cell (0.6 em) is exactly 8px: every column then starts on a whole
+/// Sized so an Ioskeley Mono cell (0.6 em) is exactly 8px: every column then starts on a whole
 /// pixel and glyph stems land on the pixel grid instead of smearing across two pixels.
 pub const MONO_SIZE: f32 = 40.0 / 3.0;
 pub const UI_SIZE: f32 = 14.0;
-pub const SMALL_SIZE: f32 = 12.0;
+pub const SMALL_SIZE: f32 = 13.0;
 
-pub const JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
+/// The single-width ("Mono") Nerd Font build, so icon glyphs keep to the 8px grid too.
+pub const IOSKELEY_MONO: &[u8] =
+    include_bytes!("../assets/fonts/IoskeleyMonoNLNerdFontMono-Regular.ttf");
 pub const IBM_PLEX: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf");
+pub const IBM_PLEX_MEDIUM: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Medium.ttf");
 
 /// The base iced theme. Most widgets get an explicit style below; this only matters for the few
 /// defaults that leak through (text colour, selection, the window background).

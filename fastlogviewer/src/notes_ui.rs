@@ -71,6 +71,7 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
         body = body.push(
             text(reason)
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().warn),
         );
     }
@@ -91,8 +92,11 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
         let entry = column![
             text(format!("Line {}", thousands(line.line as u64 + 1)))
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().accent),
-            text(first_line(&line.note)).size(theme::SMALL_SIZE),
+            text(first_line(&line.note))
+                .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL),
         ];
         list = list.push(list_row(
             entry,
@@ -104,9 +108,11 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
         let mut entry = column![row![
             text("Pattern")
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().warn),
             text(pattern.status.unwrap_or(""))
                 .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
                 .color(theme::palette().text_faint),
         ]
         .spacing(8)];
@@ -117,7 +123,11 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
                 .color(theme::palette().text_dim)
                 .wrapping(text::Wrapping::None),
         );
-        entry = entry.push(text(first_line(&pattern.note)).size(theme::SMALL_SIZE));
+        entry = entry.push(
+            text(first_line(&pattern.note))
+                .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL),
+        );
         list = list.push(list_row(
             entry,
             NotesMessage::FocusPattern(i),
@@ -228,6 +238,7 @@ fn heading_owned<'a>(label: String) -> Element<'a, NotesMessage> {
 fn dim<'a>(label: &'static str) -> Element<'a, NotesMessage> {
     text(label)
         .size(theme::SMALL_SIZE)
+        .font(theme::UI_SMALL)
         .color(theme::palette().text_dim)
         .into()
 }

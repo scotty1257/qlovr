@@ -27,7 +27,7 @@ use crate::format::thousands;
 use crate::theme;
 
 pub const ROW_H: f32 = 20.0;
-/// JetBrains Mono advances every glyph 600/1000 em. Highlight rectangles are placed at
+/// Ioskeley Mono advances every glyph 600/1000 em. Highlight rectangles are placed at
 /// `column * CHAR_W`, so this has to be the font's real advance, not a measured approximation.
 pub const CHAR_W: f32 = theme::MONO_SIZE * 0.6;
 const SCROLLBAR: f32 = 12.0;
@@ -954,7 +954,7 @@ impl LogView {
                 ),
                 color: theme::palette().text_faint,
                 size: Pixels(theme::SMALL_SIZE),
-                font: theme::UI,
+                font: theme::UI_SMALL,
                 align_y: Vertical::Center,
                 ..Text::default()
             });
