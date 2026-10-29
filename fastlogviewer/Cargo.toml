@@ -5,10 +5,18 @@ edition.workspace = true
 # iced 0.14 needs 1.88; the core crate keeps the workspace minimum.
 rust-version = "1.88"
 
+
 [dependencies]
 fastlogviewer-core = { path = "../fastlogviewer-core" }
 # Defaults are off only to drop "web-colors": blending in sRGB space makes light text on the dark
 # theme thin and washed out, so text edges are blended in linear space instead.
+windows = { version = "0.61.3", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+] }
 iced = { version = "0.14.0", default-features = false, features = [
   "canvas",
   "tokio",
@@ -22,11 +30,4 @@ iced = { version = "0.14.0", default-features = false, features = [
 rfd = "0.17.2"
 dirs = "7"
 uuid = { version = "1.26.1", features = ["v4"] }
-windows = { version = "0.61.3", features = [
-  "Win32_Foundation",
-  "Win32_Graphics_Gdi",
-  "Win32_Graphics_Dwm",
-  "Win32_UI_WindowsAndMessaging",
-  "Win32_UI_Shell",
-] }
 env_logger = "0.11.11"
