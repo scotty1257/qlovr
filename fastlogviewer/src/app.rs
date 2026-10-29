@@ -22,13 +22,13 @@ use fastlogviewer_core::{
     load_notes, notes_path, parse_line_range, pin_line_notes, save_notes, CancelToken,
     ComplementIndex, FilterIndex, IntersectionIndex, Joined, LineNote, LoadedNotes, LogFile,
     LogTemplate, LogViewMode, MatchIndex, Matcher, NotesFile, PatternNote, PrefixShape,
-    SlotFilterIndex, SlotQuery, TagStore, TemplateIndex, UnionFilterIndex, COPY_LIMIT_BYTES,
-    TAG_PALETTE,
+    RecentFiles, SlotFilterIndex, SlotQuery, TagStore, TemplateIndex, UnionFilterIndex,
+    COPY_LIMIT_BYTES, TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    button, canvas, center, column, container, operation, row, scrollable, space, stack, svg, text,
+    button, canvas, column, container, operation, row, scrollable, space, stack, svg, text,
     text_editor, text_input, tooltip, Id,
 };
 use iced::{event, window, Alignment, Color, Element, Event, Length, Padding, Subscription, Task};
@@ -170,6 +170,9 @@ pub enum Message {
     GoTop,
     GoBottom,
     OpenDialog,
+    OpenRecent(PathBuf),
+    /// Opens the file dialog in one of the common log folders.
+    BrowseFolder(PathBuf),
     Reload,
     CheckDisk,
     NewTag,
@@ -279,6 +282,10 @@ pub struct App {
     chrome_applied: bool,
     /// The HWND, kept so switching themes can retint the title bar.
     window_handle: Option<u64>,
+
+    recent: RecentFiles,
+    /// Common log folders that exist on this machine, found once at startup.
+    log_folders: Vec<(&'static str, PathBuf)>,
 }
 
 impl App {
@@ -344,6 +351,8 @@ impl App {
             columns_for: 0,
             chrome_applied: false,
             window_handle: None,
+            recent: RecentFiles::load(),
+            log_folders: log_folders(),
         };
 
         app.tag_store.load();
@@ -376,9 +385,13 @@ impl App {
         // Taken before opening, so a write that lands in between shows as a change, not a miss.
         self.file_stamp = FileStamp::of(Path::new(path));
 
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
         let file = match LogFile::open(path) {
             Ok(f) => Arc::new(f),
             Err(e) => {
+                // A recent file that no longer opens would only fail again.
+                self.recent.remove(&absolute);
+                self.recent.save();
                 rfd::MessageDialog::new()
                     .set_title("Cannot open file")
                     .set_description(e.to_string())
@@ -387,6 +400,9 @@ impl App {
                 return;
             }
         };
+
+        self.recent.add(&absolute);
+        self.recent.save();
 
         self.file = Some(file.clone());
         self.view.set_file(Some(file.clone()));
@@ -955,8 +971,12 @@ impl App {
         self.view.go_to_actual(line);
     }
 
-    fn open_dialog(&mut self) {
-        let picked = rfd::FileDialog::new()
+    fn open_dialog(&mut self, folder: Option<&Path>) {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(folder) = folder {
+            dialog = dialog.set_directory(folder);
+        }
+        let picked = dialog
             .add_filter("Log files", &["log", "txt"])
             .add_filter("All files", &["*"])
             .pick_file();
@@ -2030,7 +2050,9 @@ impl App {
             }
             Message::GoTop => self.view.go_to_start(),
             Message::GoBottom => self.view.go_to_end(),
-            Message::OpenDialog => self.open_dialog(),
+            Message::OpenDialog => self.open_dialog(None),
+            Message::OpenRecent(path) => self.load_file(&path.to_string_lossy()),
+            Message::BrowseFolder(folder) => self.open_dialog(Some(&folder)),
             Message::Reload => self.reload(),
             Message::CheckDisk => {
                 self.check_disk();
@@ -2183,7 +2205,7 @@ impl App {
                         return Task::none();
                     }
                     "o" => {
-                        self.open_dialog();
+                        self.open_dialog(None);
                         return Task::none();
                     }
                     "f" => {
@@ -2777,39 +2799,186 @@ impl App {
     }
 
     fn empty_state(&self) -> Element<'_, Message> {
-        center(
-            column![
-                container(icon(icons::FILE, 40.0, theme::palette().text_faint))
-                    .padding(18)
-                    .style(theme::segmented),
-                space().height(4),
-                text("No log file open").size(18),
-                text("Drop a file anywhere in this window, or open one to start.")
-                    .size(theme::UI_SIZE)
-                    .color(theme::palette().text_dim),
-                space().height(6),
-                button(
-                    row![
-                        icon(icons::FOLDER, 14.0, theme::palette().on_accent),
-                        text("Open file…").size(theme::UI_SIZE),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
+        let recent = self
+            .recent
+            .paths
+            .iter()
+            .map(|path| {
+                start_entry(
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    path.parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    path.to_str().unwrap_or_default(),
+                    Message::OpenRecent(path.clone()),
                 )
-                .padding([8, 16])
-                .style(theme::primary)
-                .on_press(Message::OpenDialog),
-                text("or press Ctrl+O")
-                    .size(theme::SMALL_SIZE)
-                    .font(theme::UI_SMALL)
-                    .color(theme::palette().text_faint),
-            ]
-            .spacing(10)
-            .align_x(Alignment::Center),
+            })
+            .collect();
+        let folders = self
+            .log_folders
+            .iter()
+            .map(|(label, path)| {
+                start_entry(
+                    label.to_string(),
+                    path.display().to_string(),
+                    path.to_str().unwrap_or_default(),
+                    Message::BrowseFolder(path.clone()),
+                )
+            })
+            .collect();
+
+        let hero = column![
+            container(icon(icons::FILE, 40.0, theme::palette().text_faint))
+                .padding(18)
+                .style(theme::segmented),
+            space().height(4),
+            text("No log file open").size(18),
+            text("Drop a file anywhere in this window, or open one to start.")
+                .size(theme::UI_SIZE)
+                .color(theme::palette().text_dim),
+            space().height(6),
+            button(
+                row![
+                    icon(icons::FOLDER, 14.0, theme::palette().on_accent),
+                    text("Open file…").size(theme::UI_SIZE),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([8, 16])
+            .style(theme::primary)
+            .on_press(Message::OpenDialog),
+            text("or press Ctrl+O")
+                .size(theme::SMALL_SIZE)
+                .font(theme::UI_SMALL)
+                .color(theme::palette().text_faint),
+        ]
+        .spacing(10)
+        .align_x(Alignment::Center);
+
+        let lists = row![
+            start_list("Recent files", recent, "Files you open will show up here."),
+            start_list(
+                "Log locations",
+                folders,
+                "None of the usual log folders exist."
+            ),
+        ]
+        .spacing(16);
+
+        // Top-aligned rather than centred: a full recent list is taller than the default window,
+        // and scrollable content can't fill the height to centre within it.
+        container(
+            scrollable(
+                column![hero, space().height(18), lists]
+                    .width(Length::Fill)
+                    .spacing(10)
+                    .padding(Padding {
+                        top: 48.0,
+                        bottom: 24.0,
+                        left: 16.0,
+                        right: 16.0,
+                    })
+                    .align_x(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
         .style(theme::log_surface)
         .into()
     }
+}
+
+/// One of the start screen's lists, under a small heading.
+fn start_list<'a>(
+    title: &'a str,
+    entries: Vec<Element<'a, Message>>,
+    when_empty: &'a str,
+) -> Element<'a, Message> {
+    let heading = container(
+        text(title)
+            .size(theme::SMALL_SIZE)
+            .font(theme::UI_SMALL)
+            .color(theme::palette().text_dim),
+    )
+    .padding([2, 8]);
+    let mut list = column![heading].spacing(2);
+    if entries.is_empty() {
+        list = list.push(
+            container(
+                text(when_empty)
+                    .size(theme::SMALL_SIZE)
+                    .font(theme::UI_SMALL)
+                    .color(theme::palette().text_faint),
+            )
+            .padding([5, 8]),
+        );
+    } else {
+        list = list.extend(entries);
+    }
+    container(list)
+        .width(320)
+        .padding(8)
+        .style(theme::segmented)
+        .into()
+}
+
+/// A start screen row: a name over its folder, with the whole path on hover.
+fn start_entry<'a>(
+    name: String,
+    detail: String,
+    path: &'a str,
+    message: Message,
+) -> Element<'a, Message> {
+    with_tip(
+        button(
+            column![
+                text(name)
+                    .size(theme::UI_SIZE)
+                    .color(theme::palette().text)
+                    .wrapping(text::Wrapping::None),
+                text(detail)
+                    .size(theme::SMALL_SIZE)
+                    .font(theme::UI_SMALL)
+                    .color(theme::palette().text_faint)
+                    .wrapping(text::Wrapping::None),
+            ]
+            .spacing(1),
+        )
+        .width(Length::Fill)
+        .padding([5, 8])
+        .clip(true)
+        .style(theme::ghost)
+        .on_press(message),
+        path,
+        tooltip::Position::Bottom,
+    )
+}
+
+/// Folders where Windows and common services keep their logs, those that exist on this machine.
+fn log_folders() -> Vec<(&'static str, PathBuf)> {
+    let windows =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let program_data = std::env::var_os("ProgramData")
+        .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
+    let candidates = [
+        ("Temp", Some(std::env::temp_dir())),
+        ("Local AppData", dirs::data_local_dir()),
+        ("Roaming AppData", dirs::config_dir()),
+        ("ProgramData", Some(program_data)),
+        ("Windows logs", Some(windows.join("Logs"))),
+        (
+            "System32 log files",
+            Some(windows.join(r"System32\LogFiles")),
+        ),
+        ("IIS logs", Some(PathBuf::from(r"C:\inetpub\logs\LogFiles"))),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(label, path)| path.filter(|p| p.is_dir()).map(|p| (label, p)))
+        .collect()
 }
 
 fn icon<'a>(bytes: &'static [u8], size: f32, color: Color) -> svg::Svg<'a> {
