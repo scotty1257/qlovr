@@ -6,6 +6,13 @@
 //! as long as most sampled lines agree on what kind of field sits in that position. Everything
 //! after the last agreed field is the message. A line that doesn't fit the layout (a stack
 //! trace, a wrapped message) gets no columns at all.
+//!
+//! Lines that are mostly JSON objects get a column per top-level key instead, in the order the
+//! keys are first seen, with a message-like key moved last.
+
+use std::borrow::Cow;
+
+use serde_json::{Map, Value};
 
 use crate::templates::{PrefixKind, PrefixShape};
 
@@ -23,6 +30,9 @@ const LEVELS: [&str; 11] = [
     "CRITICAL",
 ];
 
+/// JSON keys taken to hold the message, so that column goes last; compared ignoring case.
+const MESSAGE_KEYS: [&str; 4] = ["message", "msg", "@message", "@m"];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum FieldKind {
     Level,
@@ -37,9 +47,19 @@ enum FieldKind {
 }
 
 #[derive(Clone, Debug)]
+enum Layout {
+    /// An optional timestamp, then whitespace-separated fields of these kinds.
+    Text {
+        prefix: PrefixShape,
+        fields: Vec<FieldKind>,
+    },
+    /// One JSON object per line; each header is a key.
+    Json,
+}
+
+#[derive(Clone, Debug)]
 pub struct ColumnShape {
-    prefix: PrefixShape,
-    fields: Vec<FieldKind>,
+    layout: Layout,
     /// One per shown column, the message last.
     pub headers: Vec<String>,
     /// Padded width of each shown column but the message.
@@ -51,6 +71,9 @@ pub struct ColumnShape {
 pub fn detect_columns(sample: &[String]) -> Option<ColumnShape> {
     if sample.is_empty() {
         return None;
+    }
+    if let Some(shape) = detect_json_columns(sample) {
+        return Some(shape);
     }
     let bytes: Vec<Vec<u8>> = sample.iter().map(|l| l.as_bytes().to_vec()).collect();
     let prefix = PrefixShape::sniff(&bytes);
@@ -109,12 +132,49 @@ pub fn detect_columns(sample: &[String]) -> Option<ColumnShape> {
     }
     headers.push("message".to_string());
 
+    Some(fit_widths(
+        Layout::Text {
+            prefix,
+            fields: chosen,
+        },
+        headers,
+        sample,
+    ))
+}
+
+/// A column per JSON key when most sample lines are JSON objects.
+fn detect_json_columns(sample: &[String]) -> Option<ColumnShape> {
+    let needed = (sample.len() as f64 * AGREEMENT).ceil() as usize;
+    let mut objects = 0;
+    let mut keys: Vec<String> = Vec::new();
+    for object in sample.iter().filter_map(|line| parse_object(line)) {
+        objects += 1;
+        for key in object.keys() {
+            if !keys.contains(key) {
+                keys.push(key.clone());
+            }
+        }
+    }
+    if objects < needed || keys.is_empty() {
+        return None;
+    }
+    let message = keys
+        .iter()
+        .position(|k| MESSAGE_KEYS.iter().any(|m| k.eq_ignore_ascii_case(m)));
+    if let Some(at) = message {
+        let key = keys.remove(at);
+        keys.push(key);
+    }
+    Some(fit_widths(Layout::Json, keys, sample))
+}
+
+/// The shape with each column but the last as wide as its header and widest sampled value.
+fn fit_widths(layout: Layout, headers: Vec<String>, sample: &[String]) -> ColumnShape {
     let mut shape = ColumnShape {
-        prefix,
-        fields: chosen,
+        layout,
         widths: headers[..headers.len() - 1]
             .iter()
-            .map(|h| h.len())
+            .map(|h| h.chars().count().min(MAX_WIDTH))
             .collect(),
         headers,
     };
@@ -125,34 +185,50 @@ pub fn detect_columns(sample: &[String]) -> Option<ColumnShape> {
             }
         }
     }
-    Some(shape)
+    shape
 }
 
 impl ColumnShape {
     /// The line's shown columns, the message last, or `None` when it doesn't fit the layout.
-    pub fn split<'a>(&self, line: &'a str) -> Option<Vec<&'a str>> {
+    pub fn split<'a>(&self, line: &'a str) -> Option<Vec<Cow<'a, str>>> {
+        let (prefix, fields) = match &self.layout {
+            Layout::Text { prefix, fields } => (*prefix, fields),
+            Layout::Json => return self.split_json(line),
+        };
         let mut columns = Vec::with_capacity(self.headers.len());
-        let rest = if self.prefix.kind == PrefixKind::None {
+        let rest = if prefix.kind == PrefixKind::None {
             line
         } else {
-            let ts = self.prefix.measure_timestamp(line.as_bytes(), line.len());
-            columns.push(line.get(..ts)?.trim_end());
-            after_timestamp(self.prefix, line)?
+            let ts = prefix.measure_timestamp(line.as_bytes(), line.len());
+            columns.push(Cow::Borrowed(line.get(..ts)?.trim_end()));
+            after_timestamp(prefix, line)?
         };
 
         let mut rest = rest.trim_start();
-        for kind in &self.fields {
+        for kind in fields {
             let (field, after) = next_field(rest)?;
             if kind_of(field) != *kind {
                 return None;
             }
             if *kind != FieldKind::Separator {
-                columns.push(field);
+                columns.push(Cow::Borrowed(field));
             }
             rest = after.trim_start();
         }
-        columns.push(rest);
+        columns.push(Cow::Borrowed(rest));
         Some(columns)
+    }
+
+    /// A JSON line's value for each key, empty where it has none. `None` when the line isn't a
+    /// JSON object or has a key the layout lacks, so nothing is hidden.
+    fn split_json<'a>(&self, line: &str) -> Option<Vec<Cow<'a, str>>> {
+        let mut object = parse_object(line)?;
+        let columns = self
+            .headers
+            .iter()
+            .map(|key| Cow::Owned(object.remove(key).map(json_text).unwrap_or_default()))
+            .collect();
+        object.is_empty().then_some(columns)
     }
 
     /// The line laid out as padded columns, or `None` when it doesn't fit the layout.
@@ -164,7 +240,7 @@ impl ColumnShape {
             let pad = width.saturating_sub(value.chars().count()) + COLUMN_GAP;
             out.extend(std::iter::repeat_n(' ', pad));
         }
-        out.push_str(split.last().copied().unwrap_or(""));
+        out.push_str(split.last().map_or("", |v| v));
         Some(out)
     }
 
@@ -192,6 +268,24 @@ fn after_timestamp(prefix: PrefixShape, line: &str) -> Option<&str> {
         return None;
     }
     line.get(ts..)
+}
+
+/// The line as a JSON object, keys in their written order.
+fn parse_object(line: &str) -> Option<Map<String, Value>> {
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(line).ok()
+}
+
+/// A JSON value as shown in a column: strings unquoted, with line breaks and tabs flattened to
+/// spaces so the value stays on its row; anything else as compact JSON.
+fn json_text(value: Value) -> String {
+    match value {
+        Value::String(s) => s.replace(['\r', '\n', '\t'], " "),
+        other => other.to_string(),
+    }
 }
 
 /// Up to `max` leading fields of `text`.

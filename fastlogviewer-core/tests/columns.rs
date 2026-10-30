@@ -65,3 +65,42 @@ fn level_only_logs_still_get_two_columns() {
     let shape = detect_columns(&lines(text)).expect("level and message");
     assert_eq!(vec!["level", "message"], shape.headers);
 }
+
+const JSON_LINES: &str = r#"{"time": "2024-03-01T10:00:00Z", "msg": "Starting\nserver", "level": "info", "port": 8080}
+{"time": "2024-03-01T10:00:01Z", "level": "warn", "msg": "Pool nearly full"}
+{"time": "2024-03-01T10:00:02Z", "level": "error", "msg": "Refused", "error": {"code": 61}}
+{"time": "2024-03-01T10:00:03Z", "level": "info", "msg": "Ready"}"#;
+
+#[test]
+fn json_lines_get_a_column_per_key_with_the_message_last() {
+    let shape = detect_columns(&lines(JSON_LINES)).expect("a JSON layout");
+    assert_eq!(vec!["time", "level", "port", "error", "msg"], shape.headers);
+}
+
+#[test]
+fn json_values_are_unquoted_and_missing_keys_are_empty() {
+    let shape = detect_columns(&lines(JSON_LINES)).unwrap();
+    let split = shape
+        .split(r#"{"time": "t", "msg": "a\nb", "level": "error", "error": {"code": 61}}"#)
+        .unwrap();
+    assert_eq!(vec!["t", "error", "", r#"{"code":61}"#, "a b"], split);
+}
+
+#[test]
+fn json_lines_render_aligned() {
+    let shape = detect_columns(&lines(JSON_LINES)).unwrap();
+    let a = shape
+        .render(r#"{"time": "2024-03-01T10:00:00Z", "level": "info", "msg": "Starting"}"#)
+        .unwrap();
+    let b = shape
+        .render(r#"{"level": "error", "msg": "Refused", "port": 1}"#)
+        .unwrap();
+    assert_eq!(a.find("Starting"), b.find("Refused"));
+}
+
+#[test]
+fn a_json_line_with_an_unseen_key_is_left_alone() {
+    let shape = detect_columns(&lines(JSON_LINES)).unwrap();
+    assert!(shape.render(r#"{"level": "info", "extra": 1}"#).is_none());
+    assert!(shape.render("not json at all").is_none());
+}

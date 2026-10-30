@@ -2715,7 +2715,7 @@ impl Tab {
             .padding([0, 12])
             .style(theme::toggle(self.columns_wanted))
             .on_press_maybe(has_file.then_some(Message::ToggleColumns)),
-            "Lay structured lines out in columns (time, level, …)\nLines that don't fit are shown as they are",
+            "Lay structured lines out in columns (time, level, …, or JSON keys)\nLines that don't fit are shown as they are",
             tooltip::Position::Bottom,
         );
 
