@@ -22,6 +22,7 @@ mod format;
 mod log_view;
 mod notes_ui;
 mod stats_ui;
+mod tab;
 mod tag_ui;
 mod theme;
 mod win;

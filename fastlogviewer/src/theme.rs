@@ -263,6 +263,60 @@ pub fn divider(_: &Theme) -> container::Style {
     }
 }
 
+/// The row of tabs above each pane: a step darker than the toolbar, so the active tab, drawn in
+/// the toolbar's colour, reads as joined to it.
+pub fn tab_strip(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(palette().gutter.into()),
+        text_color: Some(palette().text_dim),
+        ..Default::default()
+    }
+}
+
+/// One tab in a strip. `active` is the pane's shown tab.
+pub fn tab(active: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: active.then(|| palette().surface.into()),
+        text_color: Some(if active {
+            palette().text
+        } else {
+            palette().text_dim
+        }),
+        ..Default::default()
+    }
+}
+
+/// The bar along the top of the active tab: accent in the focused pane, quieter in the others.
+pub fn tab_marker(active: bool, focused: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: match (active, focused) {
+            (true, true) => Some(palette().accent.into()),
+            (true, false) => Some(palette().border_strong.into()),
+            _ => None,
+        },
+        ..Default::default()
+    }
+}
+
+/// The 1px gaps between panes, and the split line while it is hovered or dragged.
+pub fn pane_grid(_: &Theme) -> iced::widget::pane_grid::Style {
+    use iced::widget::pane_grid::{Highlight, Line, Style};
+    Style {
+        hovered_region: Highlight {
+            background: alpha(palette().accent, 0.18).into(),
+            border: border(palette().accent, 2.0, 0.0),
+        },
+        hovered_split: Line {
+            color: palette().accent,
+            width: 2.0,
+        },
+        picked_split: Line {
+            color: palette().accent_hover,
+            width: 2.0,
+        },
+    }
+}
+
 /// The strip that names the current zoom level (patterns list, or one pattern's lines).
 pub fn breadcrumb(_: &Theme) -> container::Style {
     container::Style {
@@ -428,6 +482,19 @@ pub fn primary(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A tab's label: no surface of its own, the tab provides it.
+pub fn tab_label(_: &Theme, status: button::Status) -> button::Style {
+    let text = match status {
+        button::Status::Hovered | button::Status::Pressed => palette().text_strong,
+        _ => palette().text,
+    };
+    button_style(
+        alpha(palette().surface, 0.0),
+        text,
+        alpha(palette().surface, 0.0),
+    )
+}
+
 /// The label part of a tag chip: no surface of its own, the chip provides it.
 pub fn chip_label(_: &Theme, status: button::Status) -> button::Style {
     let text = match status {
@@ -567,5 +634,9 @@ pub mod icons {
     pub const COPY: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>"#;
     pub const SUN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>"#;
     pub const MOON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>"#;
+    pub const HOME: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .71-1.53l7-6a2 2 0 0 1 2.58 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>"#;
+    pub const SPLIT_RIGHT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/></svg>"#;
+    pub const SPLIT_DOWN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 12h18"/></svg>"#;
+    pub const CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>"#;
     pub const PLUS: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>"#;
 }
