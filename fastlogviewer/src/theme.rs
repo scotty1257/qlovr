@@ -63,6 +63,11 @@ pub struct Palette {
     pub info: Color,
     pub debug: Color,
 
+    // Gutter marks for lines that changed on disk since they were last cleared.
+    pub diff_added: Color,
+    pub diff_changed: Color,
+    pub diff_deleted: Color,
+
     /// Drop shadows and the modal backdrop; a light surface needs far less.
     pub shadow: f32,
 }
@@ -103,6 +108,10 @@ const DARK: Palette = Palette {
     info: hex(0x58C4A8),
     debug: hex(0x8A93A3),
 
+    diff_added: hex(0x3FB950),
+    diff_changed: hex(0x388BFD),
+    diff_deleted: hex(0xF85149),
+
     shadow: 1.0,
 };
 
@@ -141,6 +150,10 @@ const LIGHT: Palette = Palette {
     warn: hex(0xA87400),
     info: hex(0x14866B),
     debug: hex(0x6B7484),
+
+    diff_added: hex(0x1A7F37),
+    diff_changed: hex(0x0969DA),
+    diff_deleted: hex(0xCF222E),
 
     shadow: 0.35,
 };

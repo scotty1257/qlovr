@@ -18,12 +18,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use fastlogviewer_core::{
-    bucket_counts, bucket_start, copy_text_of, detect_columns, intersection_count, join_lines,
-    load_notes, notes_path, parse_line_range, pin_line_notes, save_notes, CancelToken,
-    ComplementIndex, FilterIndex, IntersectionIndex, Joined, LineNote, LoadedNotes, LogFile,
-    LogTemplate, LogViewMode, MatchIndex, Matcher, NotesFile, PatternNote, PrefixShape,
-    RecentFiles, SlotFilterIndex, SlotQuery, TagDef, TagStore, TemplateIndex, UnionFilterIndex,
-    COPY_LIMIT_BYTES, TAG_PALETTE,
+    bucket_counts, bucket_start, copy_text_of, detect_columns, diff_logs, intersection_count,
+    join_lines, load_notes, notes_path, parse_line_range, pin_line_notes, save_notes, CancelToken,
+    ChangeSet, ComplementIndex, FilterIndex, IntersectionIndex, Joined, LineDiff, LineNote,
+    LoadedNotes, LogFile, LogTemplate, LogViewMode, MatchIndex, Matcher, NotesFile, PatternNote,
+    PrefixShape, RecentFiles, SlotFilterIndex, SlotQuery, TagDef, TagStore, TemplateIndex,
+    UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::scrollable::{Direction, Scrollbar};
@@ -136,6 +136,16 @@ struct ShownCount {
     ct: CancelToken,
 }
 
+/// A reload's comparison with the version before it, running on a worker; `None` until done,
+/// then `Some(None)` when nothing had changed.
+struct DiffJob {
+    /// The version compared against, kept so a reload that lands mid-comparison still compares
+    /// from it and no change is skipped.
+    old: Arc<LogFile>,
+    result: Arc<Mutex<Option<Option<LineDiff>>>>,
+    ct: CancelToken,
+}
+
 /// Where the view was before a reload, by real line number, put back once the new index is done.
 #[derive(Copy, Clone)]
 struct Restore {
@@ -172,6 +182,10 @@ pub enum Message {
     BrowseFolder(PathBuf),
     Reload,
     CheckDisk,
+    /// Selects the first line of the next block that changed on disk.
+    NextChange,
+    ToggleChangesFilter,
+    ClearChanges,
     NewTag,
     Chip(Uuid, ChipAction),
     Popup(PopupMessage),
@@ -203,6 +217,11 @@ pub struct Tab {
     disk_state: DiskState,
     pending_restore: Option<Restore>,
     notice: Option<Notice>,
+    /// Lines changed on disk since the file was opened or the marks were cleared.
+    changes: Arc<ChangeSet>,
+    /// Show only the changed lines.
+    changes_filter: bool,
+    diff_job: Option<DiffJob>,
 
     search: String,
     regex_on: bool,
@@ -294,6 +313,9 @@ impl Tab {
             disk_state: DiskState::Unchanged,
             pending_restore: None,
             notice: None,
+            changes: Arc::default(),
+            changes_filter: false,
+            diff_job: None,
             search: String::new(),
             regex_on: false,
             case_on: false,
@@ -430,6 +452,8 @@ impl Tab {
 
     pub fn load_file(&mut self, path: &str) {
         self.release_current();
+        self.changes = Arc::default();
+        self.changes_filter = false;
         self.pending_restore = None;
         self.notice = None;
         self.disk_state = DiskState::Unchanged;
@@ -493,15 +517,87 @@ impl Tab {
             selected: self.view.selected_actual_line(),
             top: self.view.top_line(),
         };
+        let base = self.diff_job.as_ref().map_or(file, |job| job.old.clone());
+        let (changes, changes_filter) = (self.changes.clone(), self.changes_filter);
         // In patterns, or zoomed into one, the search box holds a pattern or slot filter that
         // means nothing to plain lines.
         if self.view.mode() == LogViewMode::Templates || self.zoom.is_some() {
             self.search.clear();
         }
         self.load_file(&path.to_string_lossy());
-        if self.file.is_some() {
+        if let Some(new) = self.file.clone() {
             self.pending_restore = Some(restore);
+            // The marks are in the old version's numbering; they come back once the comparison
+            // has renumbered them.
+            self.changes = changes;
+            self.changes_filter = changes_filter;
+            self.start_diff(base, new);
         }
+    }
+
+    /// Compares the reloaded file with the version before it, once its line index is done.
+    fn start_diff(&mut self, old: Arc<LogFile>, new: Arc<LogFile>) {
+        let result = Arc::new(Mutex::new(None));
+        let ct = CancelToken::new();
+        self.diff_job = Some(DiffJob {
+            old: old.clone(),
+            result: result.clone(),
+            ct: ct.clone(),
+        });
+        std::thread::spawn(move || {
+            while !new.index_complete() {
+                if ct.is_cancelled() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let diff = diff_logs(&old, &new, &ct);
+            if !ct.is_cancelled() {
+                *result.lock().unwrap() = Some(diff);
+            }
+        });
+    }
+
+    /// Folds a finished comparison into the change marks.
+    fn sync_diff(&mut self) {
+        let Some(job) = &self.diff_job else {
+            return;
+        };
+        let Some(diff) = job.result.lock().unwrap().take() else {
+            return;
+        };
+        self.diff_job = None;
+        if let Some(diff) = diff {
+            self.changes = Arc::new(self.changes.with(diff));
+        }
+        self.show_changes();
+    }
+
+    fn show_changes(&mut self) {
+        self.view
+            .set_changes((!self.changes.is_empty()).then(|| self.changes.clone()));
+        if self.changes_filter {
+            self.recompute_active_filter();
+        }
+    }
+
+    fn next_change(&mut self) {
+        if let Some(line) = self.changes.next_after(self.view.selected_actual_line()) {
+            self.view.go_to_actual(line as i64);
+        }
+    }
+
+    /// The file changed on disk and can be reloaded without disturbing what the user is doing:
+    /// the last load is fully indexed, no comparison is pending, and the view isn't showing
+    /// patterns (a reload drops them) or a dialog.
+    fn can_auto_reload(&self) -> bool {
+        self.file.as_ref().is_some_and(|f| f.index_complete())
+            && self.diff_job.is_none()
+            && self.view.mode() == LogViewMode::Lines
+            && self.zoom.is_none()
+            && self.popup.is_none()
+            && !self.goto_open
+            && !self.copy_open
     }
 
     fn notify(&mut self, text: impl Into<String>, error: bool) {
@@ -521,6 +617,9 @@ impl Tab {
             Some(stamp) if Some(stamp) == self.file_stamp => DiskState::Unchanged,
             Some(_) => DiskState::Changed,
         };
+        if self.disk_state == DiskState::Changed && self.can_auto_reload() {
+            self.reload();
+        }
     }
 
     /// Puts the view back where it was before a reload, once the line index is complete.
@@ -543,6 +642,10 @@ impl Tab {
     /// Cancels every worker and drops our handle on the mapping. Unlike the C#, nothing has to be
     /// joined first: the mapping lives until the last worker's `Arc` goes away.
     fn release_current(&mut self) {
+        if let Some(job) = self.diff_job.take() {
+            job.ct.cancel();
+        }
+        self.view.set_changes(None);
         self.cancel_match_scan();
         self.cancel_all_tag_filters();
         self.stop_stats();
@@ -785,6 +888,18 @@ impl Tab {
             } else {
                 Some(zoomed)
             };
+        }
+
+        if self.changes_filter {
+            let changes: Arc<dyn FilterIndex> = self.changes.clone();
+            result = Some(match result {
+                Some(other) => Arc::new(IntersectionIndex::new(
+                    changes.as_ref(),
+                    other.as_ref(),
+                    file.length(),
+                )),
+                None => changes,
+            });
         }
 
         self.view.set_active_filter(result);
@@ -2057,10 +2172,11 @@ impl Tab {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.apply(message);
+        self.sync_diff();
         self.refresh_status();
         self.sync_stats();
         self.sync_notes();
-        self.busy |= self.stats_busy() || self.notes_pin.is_some();
+        self.busy |= self.stats_busy() || self.notes_pin.is_some() || self.diff_job.is_some();
         task
     }
 
@@ -2112,6 +2228,19 @@ impl Tab {
             Message::OpenRecent(path) => self.load_file(&path.to_string_lossy()),
             Message::BrowseFolder(folder) => self.open_dialog(Some(&folder)),
             Message::Reload => self.reload(),
+            Message::NextChange => self.next_change(),
+            Message::ToggleChangesFilter => {
+                self.changes_filter = !self.changes_filter;
+                self.recompute_active_filter();
+            }
+            Message::ClearChanges => {
+                self.changes = Arc::default();
+                self.show_changes();
+                if self.changes_filter {
+                    self.changes_filter = false;
+                    self.recompute_active_filter();
+                }
+            }
             Message::CheckDisk => {
                 self.check_disk();
                 if self
@@ -2571,6 +2700,10 @@ impl Tab {
             ));
         }
 
+        if !self.changes.is_empty() {
+            tools = tools.push(self.changes_badge());
+        }
+
         let columns = with_tip(
             button(
                 text("Columns")
@@ -2641,6 +2774,53 @@ impl Tab {
             .width(Length::Fill)
             .style(theme::surface)
             .into()
+    }
+
+    /// `+N -M  F x`: how many lines changed on disk. The count steps through the changes, F shows
+    /// only them, x clears the marks.
+    fn changes_badge(&self) -> Element<'_, Message> {
+        let color = theme::palette().diff_added;
+        let label = format!(
+            "+{} −{}",
+            thousands(self.changes.changed_lines() as u64),
+            thousands(self.changes.removed_lines() as u64)
+        );
+        let count = button(text(label).size(theme::SMALL_SIZE).font(theme::UI_SMALL))
+            .padding([3, 4])
+            .style(theme::chip_label)
+            .on_press(Message::NextChange);
+        // Same glyph-baseline nudge as the tag chips' switches.
+        let filter = button(text("F").size(11).font(theme::MONO).center())
+            .width(20)
+            .height(20)
+            .padding(Padding {
+                top: 1.0,
+                ..Padding::ZERO
+            })
+            .style(theme::chip_switch(self.changes_filter, false, color))
+            .on_press(Message::ToggleChangesFilter);
+        let clear = button(text("×").size(14).center())
+            .width(20)
+            .height(20)
+            .padding(0)
+            .style(theme::chip_remove)
+            .on_press(Message::ClearChanges);
+        container(
+            row![
+                with_tip(
+                    count,
+                    "Lines changed on disk since the file was opened: new or rewritten, and removed.\nClick to go to the next change",
+                    tooltip::Position::Bottom,
+                ),
+                with_tip(filter, "Show only the changed lines", tooltip::Position::Bottom),
+                with_tip(clear, "Clear the change marks", tooltip::Position::Bottom),
+            ]
+            .spacing(2)
+            .align_y(Alignment::Center),
+        )
+        .padding([2, 4])
+        .style(theme::chip(color))
+        .into()
     }
 
     fn tag_bar(&self) -> Element<'_, Message> {

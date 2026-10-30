@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastlogviewer_core::{
-    copy_text_of, join_texts, ColumnShape, FilterIndex, Joined, LogFile, LogTemplate, LogViewMode,
-    MatchIndex, Matcher, TagDef, MAX_LINE_BYTES,
+    copy_text_of, join_texts, ChangeKind, ChangeSet, ColumnShape, FilterIndex, Joined, LogFile,
+    LogTemplate, LogViewMode, MatchIndex, Matcher, TagDef, MAX_LINE_BYTES,
 };
 use iced::alignment::Vertical;
 use iced::keyboard::{self, key::Named, Key};
@@ -101,6 +101,9 @@ pub struct LogView {
     /// Patterns with a note; their lines get a pattern marker.
     note_patterns: Vec<Arc<LogTemplate>>,
 
+    /// Lines that changed on disk, marked at the gutter's inner edge.
+    changes: Option<Arc<ChangeSet>>,
+
     /// Wrap every line to the view's width.
     wrap_all: bool,
     /// Real line numbers wrapped one at a time (Enter or double-click).
@@ -134,6 +137,7 @@ impl LogView {
             columns: None,
             note_lines: HashSet::new(),
             note_patterns: Vec::new(),
+            changes: None,
             wrap_all: false,
             wrapped: HashSet::new(),
             viewport: Cell::new(Size::ZERO),
@@ -291,6 +295,10 @@ impl LogView {
     pub fn set_note_marks(&mut self, lines: HashSet<i64>, patterns: Vec<Arc<LogTemplate>>) {
         self.note_lines = lines;
         self.note_patterns = patterns;
+    }
+
+    pub fn set_changes(&mut self, changes: Option<Arc<ChangeSet>>) {
+        self.changes = changes;
     }
 
     /// Whether a real line has a line note and whether it belongs to a pattern with a note.
@@ -754,6 +762,34 @@ impl LogView {
                     Size::new(3.0, height - 4.0),
                     color,
                 );
+            }
+            // Changed on disk: a bar at the gutter's inner edge, green for new lines and blue for
+            // rewritten ones, and a red notch where lines were deleted.
+            if let Some(changes) = &self.changes {
+                let line = line as usize;
+                if let Some(kind) = changes.kind_of(line) {
+                    frame.fill_rectangle(
+                        Point::new(gutter_w - 4.0, y),
+                        Size::new(3.0, height),
+                        match kind {
+                            ChangeKind::Added => theme::palette().diff_added,
+                            ChangeKind::Changed => theme::palette().diff_changed,
+                        },
+                    );
+                }
+                let notch = |frame: &mut Frame, y: f32| {
+                    frame.fill_rectangle(
+                        Point::new(gutter_w - 9.0, y - 1.0),
+                        Size::new(8.0, 2.0),
+                        theme::palette().diff_deleted,
+                    );
+                };
+                if changes.deleted_before(line) {
+                    notch(frame, y + 1.0);
+                }
+                if line + 1 == file.line_count() && changes.deleted_before(line + 1) {
+                    notch(frame, y + height - 1.0);
+                }
             }
             if is_selected {
                 frame.fill_rectangle(

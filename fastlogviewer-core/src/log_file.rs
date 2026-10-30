@@ -109,7 +109,7 @@ impl LogFile {
         self.index_complete.load(Ordering::Acquire)
     }
 
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         match &self.mmap {
             Some(m) => m,
             None => &[],
