@@ -785,7 +785,7 @@ impl LogView {
                     position: center,
                     color: theme::palette().text_faint,
                     size: Pixels(theme::MONO_SIZE),
-                    font: theme::MONO,
+                    font: theme::LOG_MONO,
                     align_x: Alignment::Center,
                     align_y: Vertical::Center,
                     shaping: Shaping::Basic,
@@ -802,7 +802,7 @@ impl LogView {
                     theme::palette().text_faint
                 },
                 size: Pixels(theme::MONO_SIZE),
-                font: theme::MONO,
+                font: theme::LOG_MONO,
                 align_x: Alignment::Right,
                 align_y: Vertical::Center,
                 shaping: Shaping::Basic,
@@ -905,7 +905,7 @@ impl LogView {
                             ),
                             color: ink[run_start],
                             size: Pixels(theme::MONO_SIZE),
-                            font: theme::MONO,
+                            font: theme::LOG_MONO,
                             align_y: Vertical::Center,
                             shaping: Shaping::Basic,
                             ..Text::default()
@@ -1083,7 +1083,7 @@ impl LogView {
                     theme::palette().text_dim
                 },
                 size: Pixels(theme::MONO_SIZE),
-                font: theme::MONO,
+                font: theme::LOG_MONO,
                 align_x: Alignment::Right,
                 align_y: Vertical::Center,
                 shaping: Shaping::Basic,
@@ -1105,7 +1105,7 @@ impl LogView {
                     theme::palette().text
                 },
                 size: Pixels(theme::MONO_SIZE),
-                font: theme::MONO,
+                font: theme::LOG_MONO,
                 align_y: Vertical::Center,
                 ..Text::default()
             });

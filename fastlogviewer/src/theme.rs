@@ -183,6 +183,11 @@ pub fn set_light(light: bool) {
 }
 
 pub const MONO: Font = Font::with_name("IoskeleyMonoNL Nerd Font Mono");
+/// The log text is set a weight up from the toolbar's mono labels, for slightly firmer strokes.
+pub const LOG_MONO: Font = Font {
+    weight: Weight::Medium,
+    ..MONO
+};
 pub const UI: Font = Font::with_name("IBM Plex Sans");
 /// Small UI text is set a weight up: Regular at 13px draws thin, washed-out strokes.
 pub const UI_SMALL: Font = Font {
@@ -199,6 +204,8 @@ pub const SMALL_SIZE: f32 = 13.0;
 /// The single-width ("Mono") Nerd Font build, so icon glyphs keep to the 8px grid too.
 pub const IOSKELEY_MONO: &[u8] =
     include_bytes!("../assets/fonts/IoskeleyMonoNLNerdFontMono-Regular.ttf");
+pub const IOSKELEY_MONO_MEDIUM: &[u8] =
+    include_bytes!("../assets/fonts/IoskeleyMonoNLNerdFontMono-Medium.ttf");
 pub const IBM_PLEX: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf");
 pub const IBM_PLEX_MEDIUM: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Medium.ttf");
 
