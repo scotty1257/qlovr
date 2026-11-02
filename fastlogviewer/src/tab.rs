@@ -31,7 +31,7 @@ use iced::widget::{
     button, canvas, column, container, operation, responsive, row, scrollable, space, stack, svg,
     text, text_editor, text_input, tooltip, Id,
 };
-use iced::{Alignment, Color, Element, Length, Padding, Task};
+use iced::{Alignment, Color, Element, Length, Padding, Task, Widget};
 use uuid::Uuid;
 
 use crate::format::{thousands, thousands_1dp};
@@ -454,7 +454,7 @@ impl Tab {
     /// Focuses the search box (Ctrl+F).
     pub fn focus_search(&self) -> Task<Message> {
         operation::focus(self.search_input.clone())
-            .chain(operation::select_all(self.search_input.clone()))
+            .chain(operation::text_input::select_all(self.search_input.clone()))
     }
 
     fn sync_view_tags(&mut self) {
@@ -1810,6 +1810,7 @@ impl Tab {
             read_only: self.notes_read_only.clone(),
         })
         .map(Message::Notes)
+        .boxed()
     }
 
     // ---------------------------------------------------------------- columns
@@ -1949,6 +1950,7 @@ impl Tab {
         } else {
             joined.text
         })
+        .discard()
     }
 
     fn report_copy(&mut self, joined: &Joined) {
@@ -2555,8 +2557,11 @@ impl Tab {
 
     pub fn view(&self) -> Element<'_, Message> {
         let surface: Element<'_, Message> = if self.file.is_some() {
-            Element::from(canvas(&self.view).width(Length::Fill).height(Length::Fill))
+            canvas(&self.view)
+                .width(Length::Fill)
+                .height(Length::Fill)
                 .map(Message::View)
+                .boxed()
         } else {
             self.empty_state()
         };
@@ -2575,11 +2580,11 @@ impl Tab {
                 vertical_rule(),
                 stats_panel(self.tag_stats(), self.view.filter_on()).map(Message::Stats),
             ]
-            .into(),
+            .boxed(),
             Some(SidePanel::Notes) if self.file.is_some() => {
-                row![surface, vertical_rule(), self.notes_view()].into()
+                row![surface, vertical_rule(), self.notes_view()].boxed()
             }
-            _ => surface.into(),
+            _ => surface.boxed(),
         };
         let layout = layout.push(body).push(rule()).push(self.status_bar());
 
@@ -2589,14 +2594,14 @@ impl Tab {
             .style(theme::log_surface);
 
         if let Some(popup) = &self.popup {
-            stack![base, modal(popup.view().map(Message::Popup))].into()
+            stack![base, modal(popup.view().map(Message::Popup))].boxed()
         } else if self.goto_open {
             let lines = self.file.as_ref().map_or(0, |f| f.line_count());
             stack![
                 base,
                 modal(goto_view(&self.goto_text, lines).map(Message::Goto))
             ]
-            .into()
+            .boxed()
         } else if self.copy_open {
             let lines = self.file.as_ref().map_or(0, |f| f.line_count());
             let in_lines = self.view.mode() == LogViewMode::Lines;
@@ -2610,18 +2615,18 @@ impl Tab {
                     .map_or(0, |(first, last)| last - first + 1),
             };
             let dialog = copy_view(choices, &self.copy_range, self.copy_error.as_deref(), lines);
-            stack![base, modal(dialog.map(Message::Copy))].into()
+            stack![base, modal(dialog.map(Message::Copy))].boxed()
         } else if let Some(dialog) = &self.columns_dialog {
-            stack![base, modal(dialog.view().map(Message::Columns))].into()
+            stack![base, modal(dialog.view().map(Message::Columns))].boxed()
         } else {
-            base.into()
+            base.boxed()
         }
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
         responsive(move |size| self.toolbar_at(size.width < NARROW_TOOLBAR))
             .height(Length::Shrink)
-            .into()
+            .boxed()
     }
 
     /// `narrow` (a split pane) moves the search box and its options onto a second row, where it
@@ -2869,7 +2874,7 @@ impl Tab {
                 row![search, options].spacing(8).align_y(Alignment::Center),
             ]
             .spacing(8)
-            .into()
+            .boxed()
         } else {
             row![
                 tools,
@@ -2885,13 +2890,13 @@ impl Tab {
             ]
             .spacing(8)
             .align_y(Alignment::Center)
-            .into()
+            .boxed()
         };
         container(content)
             .padding([10, 12])
             .width(Length::Fill)
             .style(theme::surface)
-            .into()
+            .boxed()
     }
 
     /// `+N -M  F x`: how many lines changed on disk. The count steps through the changes, F shows
@@ -2938,7 +2943,7 @@ impl Tab {
         )
         .padding([2, 4])
         .style(theme::chip(color))
-        .into()
+        .boxed()
     }
 
     fn tag_bar(&self) -> Element<'_, Message> {
@@ -3003,7 +3008,7 @@ impl Tab {
         .align_y(Alignment::Center)
         .width(Length::Fill)
         .style(theme::surface)
-        .into()
+        .boxed()
     }
 
     /// Names the zoom level when semantic zoom is active, with the keys that move between levels.
@@ -3053,7 +3058,7 @@ impl Tab {
                 .width(Length::Fill)
                 .clip(true)
                 .style(theme::breadcrumb)
-                .into(),
+                .boxed(),
         )
     }
 
@@ -3087,11 +3092,12 @@ impl Tab {
                         } else {
                             theme::palette().accent
                         })
-                        .wrapping(text::Wrapping::None),
+                        .wrapping(text::Wrapping::None)
+                        .boxed(),
                 );
             }
         }
-        bar = bar.push(space().width(Length::Fill));
+        bar = bar.push(space().width(Length::Fill).boxed());
 
         for (keys, label) in HINTS {
             bar = bar.push(
@@ -3120,7 +3126,8 @@ impl Tab {
                         .wrapping(text::Wrapping::None),
                 ]
                 .spacing(5)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Center)
+                .boxed(),
             );
         }
 
@@ -3129,7 +3136,7 @@ impl Tab {
             .width(Length::Fill)
             .clip(true)
             .style(theme::surface)
-            .into()
+            .boxed()
     }
 
     fn empty_state(&self) -> Element<'_, Message> {
@@ -3225,7 +3232,7 @@ impl Tab {
             .height(Length::Fill),
         )
         .style(theme::log_surface)
-        .into()
+        .boxed()
     }
 }
 
@@ -3251,7 +3258,8 @@ fn start_list<'a>(
                     .font(theme::UI_SMALL)
                     .color(theme::palette().text_faint),
             )
-            .padding([5, 8]),
+            .padding([5, 8])
+            .boxed(),
         );
     } else {
         list = list.extend(entries);
@@ -3260,7 +3268,7 @@ fn start_list<'a>(
         .width(320)
         .padding(8)
         .style(theme::segmented)
-        .into()
+        .boxed()
 }
 
 /// A start screen row: a name over its folder, with the whole path on hover.
@@ -3332,7 +3340,7 @@ fn vertical_rule<'a>() -> Element<'a, Message> {
         .width(1)
         .height(Length::Fill)
         .style(theme::divider)
-        .into()
+        .boxed()
 }
 
 fn unix_now() -> u64 {
@@ -3355,5 +3363,5 @@ fn rule<'a>() -> Element<'a, Message> {
         .width(Length::Fill)
         .height(1)
         .style(theme::divider)
-        .into()
+        .boxed()
 }

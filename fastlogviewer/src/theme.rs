@@ -195,13 +195,13 @@ pub fn set_light(light: bool) {
     let _ = std::fs::write(path, if light { "light" } else { "dark" });
 }
 
-pub const MONO: Font = Font::with_name("IoskeleyMonoNL Nerd Font Mono");
+pub const MONO: Font = Font::new("IoskeleyMonoNL Nerd Font Mono");
 /// The log text is set a weight up from the toolbar's mono labels, for slightly firmer strokes.
 pub const LOG_MONO: Font = Font {
     weight: Weight::Medium,
     ..MONO
 };
-pub const UI: Font = Font::with_name("IBM Plex Sans");
+pub const UI: Font = Font::new("IBM Plex Sans");
 /// Small UI text is set a weight up: Regular at 13px draws thin, washed-out strokes.
 pub const UI_SMALL: Font = Font {
     weight: Weight::Medium,
@@ -232,7 +232,7 @@ pub fn app_theme() -> Theme {
         } else {
             "FastLogViewer"
         },
-        iced::theme::Palette {
+        iced::theme::palette::Seed {
             background: p.bg,
             text: p.text,
             primary: p.accent,
@@ -613,7 +613,6 @@ pub fn input(_: &Theme, status: text_input::Status) -> text_input::Style {
     text_input::Style {
         background: palette().raised.into(),
         border: border(edge, 1.0, 8.0),
-        icon: palette().text_dim,
         placeholder: palette().text_faint,
         value: palette().text,
         selection: alpha(palette().accent, 0.35),

@@ -2,7 +2,7 @@
 //! every note on the file.
 
 use iced::widget::{button, column, container, row, scrollable, space, text, text_editor, tooltip};
-use iced::{Alignment, Element, Length};
+use iced::{Alignment, Element, Length, Widget};
 
 use crate::format::thousands;
 use crate::tag_ui::with_tip;
@@ -72,7 +72,8 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
             text(reason)
                 .size(theme::SMALL_SIZE)
                 .font(theme::UI_SMALL)
-                .color(theme::palette().warn),
+                .color(theme::palette().warn)
+                .boxed(),
         );
     }
     if let Some(focus) = panel.focus {
@@ -121,12 +122,14 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
                 .font(theme::MONO)
                 .size(10.5)
                 .color(theme::palette().text_dim)
-                .wrapping(text::Wrapping::None),
+                .wrapping(text::Wrapping::None)
+                .boxed(),
         );
         entry = entry.push(
             text(first_line(&pattern.note))
                 .size(theme::SMALL_SIZE)
-                .font(theme::UI_SMALL),
+                .font(theme::UI_SMALL)
+                .boxed(),
         );
         list = list.push(list_row(
             entry,
@@ -134,7 +137,7 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
             NotesMessage::DeletePattern(i),
         ));
     }
-    body = body.push(list);
+    body = body.push(list.boxed());
 
     container(column![header, scrollable(body).height(Length::Fill).spacing(6)].spacing(12))
         .width(PANEL_W)
@@ -142,7 +145,7 @@ pub fn notes_panel(panel: Panel<'_>) -> Element<'_, NotesMessage> {
         .padding([10, 14])
         .clip(true)
         .style(theme::surface)
-        .into()
+        .boxed()
 }
 
 fn focus_section<'a>(focus: Focus<'a>, placing: bool) -> Element<'a, NotesMessage> {
@@ -158,7 +161,8 @@ fn focus_section<'a>(focus: Focus<'a>, placing: bool) -> Element<'a, NotesMessag
                 .font(theme::MONO)
                 .size(10.5)
                 .color(theme::palette().text_dim)
-                .wrapping(text::Wrapping::None),
+                .wrapping(text::Wrapping::None)
+                .boxed(),
         );
         let mut editor = text_editor(focus.line_editor)
             .placeholder("Add a note for this line…")
@@ -167,7 +171,7 @@ fn focus_section<'a>(focus: Focus<'a>, placing: bool) -> Element<'a, NotesMessag
         if !placing {
             editor = editor.on_action(NotesMessage::EditLine);
         }
-        section = section.push(editor);
+        section = section.push(editor.boxed());
     }
     if let Some(pattern) = focus.pattern {
         section = section.push(heading("PATTERN"));
@@ -176,25 +180,27 @@ fn focus_section<'a>(focus: Focus<'a>, placing: bool) -> Element<'a, NotesMessag
                 .font(theme::MONO)
                 .size(10.5)
                 .color(theme::palette().text_dim)
-                .wrapping(text::Wrapping::None),
+                .wrapping(text::Wrapping::None)
+                .boxed(),
         );
         section = section.push(
             text_editor(focus.pattern_editor)
                 .placeholder("Add a note for every line in this pattern…")
                 .height(90)
                 .size(theme::UI_SIZE)
-                .on_action(NotesMessage::EditPattern),
+                .on_action(NotesMessage::EditPattern)
+                .boxed(),
         );
     } else if has_line {
         section = section.push(dim(
             "Run Patterns (Ctrl+M) to note every line like this one.",
         ));
     }
-    section.into()
+    section.boxed()
 }
 
 fn list_row<'a>(
-    entry: impl Into<Element<'a, NotesMessage>>,
+    entry: impl Widget<NotesMessage> + 'a,
     open: NotesMessage,
     delete: NotesMessage,
 ) -> Element<'a, NotesMessage> {
@@ -208,7 +214,7 @@ fn list_row<'a>(
     ]
     .spacing(4)
     .align_y(Alignment::Center)
-    .into()
+    .boxed()
 }
 
 fn close_button<'a>(message: NotesMessage) -> Element<'a, NotesMessage> {
@@ -218,21 +224,21 @@ fn close_button<'a>(message: NotesMessage) -> Element<'a, NotesMessage> {
         .padding(0)
         .style(theme::chip_remove)
         .on_press(message)
-        .into()
+        .boxed()
 }
 
 fn heading<'a>(label: &'static str) -> Element<'a, NotesMessage> {
     text(label)
         .size(10.5)
         .color(theme::palette().text_faint)
-        .into()
+        .boxed()
 }
 
 fn heading_owned<'a>(label: String) -> Element<'a, NotesMessage> {
     text(label)
         .size(10.5)
         .color(theme::palette().text_faint)
-        .into()
+        .boxed()
 }
 
 fn dim<'a>(label: &'static str) -> Element<'a, NotesMessage> {
@@ -240,7 +246,7 @@ fn dim<'a>(label: &'static str) -> Element<'a, NotesMessage> {
         .size(theme::SMALL_SIZE)
         .font(theme::UI_SMALL)
         .color(theme::palette().text_dim)
-        .into()
+        .boxed()
 }
 
 fn divider<'a>() -> Element<'a, NotesMessage> {
@@ -248,7 +254,7 @@ fn divider<'a>() -> Element<'a, NotesMessage> {
         .width(Length::Fill)
         .height(1)
         .style(theme::divider)
-        .into()
+        .boxed()
 }
 
 /// The first line of a note, for the list.

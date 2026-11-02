@@ -13,7 +13,7 @@ use iced::keyboard::{self, key::Named, Key};
 use iced::widget::pane_grid::{self, Axis, PaneGrid};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, column, container, row, scrollable, space, text, tooltip};
-use iced::{event, window, Alignment, Element, Event, Length, Subscription, Task};
+use iced::{event, window, Alignment, Element, Widget, Event, Length, Subscription, Task};
 
 use crate::tab::{self, icon, Tab};
 use crate::tag_ui::with_tip;
@@ -399,9 +399,9 @@ impl App {
             let body: Element<'_, Message> = match self.tabs.get(&state.active) {
                 Some(tab) => {
                     let id = state.active;
-                    tab.view().map(move |m| Message::Tab(id, m))
+                    tab.view().map(move |m| Message::Tab(id, m)).boxed()
                 }
-                None => space().into(),
+                None => space().boxed(),
             };
             pane_grid::Content::new(column![self.tab_strip(pane, state), body])
         })
@@ -415,7 +415,7 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::divider)
-            .into()
+            .boxed()
     }
 
     fn tab_strip<'a>(&'a self, pane: pane_grid::Pane, state: &'a Pane) -> Element<'a, Message> {
@@ -454,7 +454,7 @@ impl App {
             let element = container(element).style(theme::tab(active));
             tabs = tabs.push(match tab.file_path().and_then(Path::to_str) {
                 Some(path) => with_tip(element, path, tooltip::Position::Bottom),
-                None => element.into(),
+                None => element.boxed(),
             });
         }
 
@@ -474,7 +474,8 @@ impl App {
                 Message::NewTab(pane),
                 "New tab on the start screen  (Ctrl+T)",
             ))
-            .padding([0, 4]),
+            .padding([0, 4])
+            .boxed(),
         );
 
         let mut tools = row![
@@ -515,6 +516,6 @@ impl App {
         .align_y(Alignment::End)
         .width(Length::Fill)
         .style(theme::tab_strip)
-        .into()
+        .boxed()
     }
 }

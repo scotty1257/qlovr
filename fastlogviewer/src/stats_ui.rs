@@ -7,7 +7,7 @@ use iced::widget::canvas::{self, Action, Event, Frame, Geometry};
 use iced::widget::{
     button, canvas as canvas_widget, column, container, row, scrollable, space, text,
 };
-use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+use iced::{Alignment, Color, Element, Length, Widget, Point, Rectangle, Renderer, Size, Theme};
 use uuid::Uuid;
 
 use crate::format::thousands;
@@ -65,7 +65,8 @@ pub fn stats_panel(stats: Vec<TagStat>, filter_on: bool) -> Element<'static, Sta
             text("Add a tag to see how often it matches.")
                 .size(theme::SMALL_SIZE)
                 .font(theme::UI_SMALL)
-                .color(theme::palette().text_dim),
+                .color(theme::palette().text_dim)
+                .boxed(),
         );
     }
     for stat in stats {
@@ -77,7 +78,7 @@ pub fn stats_panel(stats: Vec<TagStat>, filter_on: bool) -> Element<'static, Sta
         .height(Length::Fill)
         .padding([10, 14])
         .style(theme::surface)
-        .into()
+        .boxed()
 }
 
 fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
@@ -120,7 +121,7 @@ fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
                 .size(theme::SMALL_SIZE)
                 .font(theme::UI_SMALL)
                 .color(theme::palette().text_faint)
-                .into();
+                .boxed();
         };
         let mut content = column![
             text(format!("{label}  line {}", thousands(line as u64 + 1)))
@@ -132,14 +133,15 @@ fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
                 text(stamp)
                     .font(theme::MONO)
                     .size(10.5)
-                    .color(theme::palette().text_dim),
+                    .color(theme::palette().text_dim)
+                    .boxed(),
             );
         }
         button(content)
             .padding([2, 4])
             .style(theme::ghost)
             .on_press(StatsMessage::JumpToLine(line))
-            .into()
+            .boxed()
     };
 
     column![
@@ -157,7 +159,7 @@ fn tag_block(stat: TagStat, filter_on: bool) -> Element<'static, StatsMessage> {
         .align_y(Alignment::Start),
     ]
     .spacing(6)
-    .into()
+    .boxed()
 }
 
 /// The file as a horizontal bar, one cell per bucket, shaded by how many matches it holds.

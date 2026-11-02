@@ -29,7 +29,7 @@ mod win;
 
 use iced::{
     window::{self, settings::PlatformSpecific},
-    Program, Size,
+    Size,
 };
 
 fn main() -> iced::Result {
@@ -61,11 +61,13 @@ fn main() -> iced::Result {
     .title(app::App::title)
     .subscription(app::App::subscription)
     .theme(|_: &app::App| theme::app_theme())
-    .font(theme::IOSKELEY_MONO)
-    .font(theme::IOSKELEY_MONO_MEDIUM)
-    .font(theme::IBM_PLEX)
-    .font(theme::IBM_PLEX_MEDIUM)
-    .default_font(theme::UI)
+    .fonts([
+        theme::IOSKELEY_MONO,
+        theme::IOSKELEY_MONO_MEDIUM,
+        theme::IBM_PLEX,
+        theme::IBM_PLEX_MEDIUM,
+    ])
+    .font(theme::UI)
     .antialiasing(true)
     .window(settings)
     .run()

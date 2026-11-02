@@ -4,7 +4,7 @@ use fastlogviewer_core::{ColumnSettings, Matcher, TagDef, TAG_PALETTE};
 use iced::widget::{
     button, center, checkbox, column, container, opaque, row, space, text, text_input, tooltip, Id,
 };
-use iced::{Alignment, Color, Element, Length, Padding};
+use iced::{Alignment, Color, Element, Length, Padding, Widget};
 use uuid::Uuid;
 
 use crate::theme;
@@ -29,7 +29,7 @@ fn tag_color(tag: &TagDef) -> Color {
 
 /// Small text with a styled tooltip; every icon-ish control in the window uses one.
 pub fn with_tip<'a, Message: 'a>(
-    content: impl Into<Element<'a, Message>>,
+    content: impl Widget<Message> + 'a,
     tip: &'a str,
     position: tooltip::Position,
 ) -> Element<'a, Message> {
@@ -41,7 +41,7 @@ pub fn with_tip<'a, Message: 'a>(
         position,
     )
     .gap(6)
-    .into()
+    .boxed()
 }
 
 /// `● label  H F ×` — clicking the label edits the tag, H and F toggle highlight and filter.
@@ -113,12 +113,12 @@ pub fn tag_chip<'a, Message: Clone + 'a>(
     )
     .padding([2, 4])
     .style(theme::chip(color))
-    .into()
+    .boxed()
 }
 
 /// Centres `content` over a dimmed backdrop that swallows clicks to the window behind it.
-pub fn modal<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    opaque(center(content).style(theme::backdrop))
+pub fn modal<'a, Message: 'a>(content: impl Widget<Message> + 'a) -> Element<'a, Message> {
+    opaque(center(content).style(theme::backdrop)).boxed()
 }
 
 fn field_label<'a, Message: 'a>(label: &'a str) -> Element<'a, Message> {
@@ -126,7 +126,7 @@ fn field_label<'a, Message: 'a>(label: &'a str) -> Element<'a, Message> {
         .size(theme::SMALL_SIZE)
         .font(theme::UI_SMALL)
         .color(theme::palette().text_dim)
-        .into()
+        .boxed()
 }
 
 fn dialog_buttons<'a, Message: Clone + 'a>(
@@ -146,18 +146,18 @@ fn dialog_buttons<'a, Message: Clone + 'a>(
             .on_press_maybe(accept),
     ]
     .spacing(8)
-    .into()
+    .boxed()
 }
 
 fn dialog_card<'a, Message: 'a>(
     width: f32,
-    body: impl Into<Element<'a, Message>>,
+    body: impl Widget<Message> + 'a,
 ) -> Element<'a, Message> {
     container(body)
         .width(width)
         .padding(22)
         .style(theme::card)
-        .into()
+        .boxed()
 }
 
 // --------------------------------------------------------------- TagEditPopup
@@ -319,7 +319,7 @@ impl TagEditPopup {
                                 selected == Some(i),
                             ))
                             .on_press(pick(Some(i)))
-                            .into()
+                            .boxed()
                     },
                 )),
             )
@@ -435,7 +435,7 @@ pub fn goto_view(input: &str, line_count: usize) -> Element<'_, GotoMessage> {
     let body = column![
         text("Go to line").size(17),
         text_input(
-            &format!("1 – {}", crate::format::thousands(line_count as u64)),
+            format!("1 – {}", crate::format::thousands(line_count as u64)),
             input
         )
         .id(GOTO_INPUT)
@@ -529,7 +529,7 @@ pub fn copy_view<'a>(
         column![
             field_label("Line range"),
             row![
-                text_input(&format!("from-to, e.g. 1-{}", line_count.min(100)), range)
+                text_input(format!("from-to, e.g. 1-{}", line_count.min(100)), range)
                     .id(COPY_RANGE_INPUT)
                     .on_input(CopyMessage::RangeInput)
                     .on_submit(CopyMessage::Range)
@@ -629,7 +629,7 @@ impl ColumnsDialog {
                 .padding([5, 10])
                 .style(theme::toggle(!self.auto && self.delimiter == *delimiter))
                 .on_press(ColumnsMessage::Delimiter(delimiter.to_string()))
-                .into()
+                .boxed()
         }))
         .spacing(6);
 
