@@ -29,7 +29,7 @@ pub mod tags;
 pub mod templates;
 
 pub use cancel::CancelToken;
-pub use columns::{detect_columns, ColumnShape};
+pub use columns::{detect_columns, ColumnFitIndex, ColumnSettings, ColumnShape};
 pub use copy::{copy_text_of, join_lines, join_texts, parse_line_range, Joined, COPY_LIMIT_BYTES};
 pub use diff::{diff_logs, ChangeKind, ChangeMark, ChangeSet, LineDiff};
 pub use filter::{ComplementIndex, FilterIndex, IntersectionIndex, UnionFilterIndex};

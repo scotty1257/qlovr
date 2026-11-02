@@ -1,6 +1,6 @@
-//! Tag chips, and the two modal dialogs: the tag editor and go-to-line.
+//! Tag chips, and the modal dialogs: the tag editor, go-to-line, copy and columns.
 
-use fastlogviewer_core::{Matcher, TagDef, TAG_PALETTE};
+use fastlogviewer_core::{ColumnSettings, Matcher, TagDef, TAG_PALETTE};
 use iced::widget::{
     button, center, checkbox, column, container, opaque, row, space, text, text_input, tooltip, Id,
 };
@@ -12,6 +12,7 @@ use crate::theme;
 pub const TAG_LABEL_INPUT: Id = Id::new("tag_label");
 pub const GOTO_INPUT: Id = Id::new("goto_line");
 pub const COPY_RANGE_INPUT: Id = Id::new("copy_range");
+pub const COLUMNS_INPUT: Id = Id::new("columns_delimiter");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChipAction {
@@ -560,4 +561,112 @@ pub fn copy_view<'a>(
     .spacing(16);
 
     dialog_card(380.0, body)
+}
+
+// --------------------------------------------------------------------- columns
+
+#[derive(Debug, Clone)]
+pub enum ColumnsMessage {
+    Auto,
+    Custom,
+    Delimiter(String),
+    HideMisfits(bool),
+    Apply,
+    Cancel,
+}
+
+/// Delimiters offered as one-click choices: label and text.
+const DELIMITER_PRESETS: [(&str, &str); 5] = [
+    ("Space", " "),
+    (":", ":"),
+    ("|", "|"),
+    (";", ";"),
+    (",", ","),
+];
+
+/// The Columns dialog: detect the layout or split on a delimiter, and whether to hide the lines
+/// that don't fit.
+pub struct ColumnsDialog {
+    pub auto: bool,
+    pub delimiter: String,
+    pub hide_misfits: bool,
+}
+
+impl ColumnsDialog {
+    pub fn new(settings: &ColumnSettings) -> Self {
+        ColumnsDialog {
+            auto: settings.delimiter.is_none(),
+            delimiter: settings.delimiter.clone().unwrap_or_default(),
+            hide_misfits: settings.hide_misfits,
+        }
+    }
+
+    /// The settings chosen, or `None` while a delimiter is wanted but none is typed.
+    pub fn settings(&self) -> Option<ColumnSettings> {
+        let delimiter = if self.auto {
+            None
+        } else if self.delimiter.is_empty() {
+            return None;
+        } else {
+            Some(self.delimiter.clone())
+        };
+        Some(ColumnSettings {
+            delimiter,
+            hide_misfits: self.hide_misfits,
+        })
+    }
+
+    pub fn view(&self) -> Element<'_, ColumnsMessage> {
+        let mode = |label: &'static str, on: bool, message: ColumnsMessage| {
+            button(text(label).size(theme::UI_SIZE).center())
+                .width(Length::Fill)
+                .padding([7, 12])
+                .style(theme::toggle(on))
+                .on_press(message)
+        };
+        let presets = row(DELIMITER_PRESETS.iter().map(|(label, delimiter)| {
+            button(text(*label).size(theme::UI_SIZE).font(theme::MONO).center())
+                .padding([5, 10])
+                .style(theme::toggle(!self.auto && self.delimiter == *delimiter))
+                .on_press(ColumnsMessage::Delimiter(delimiter.to_string()))
+                .into()
+        }))
+        .spacing(6);
+
+        let body = column![
+            text("Columns").size(17),
+            row![
+                mode("Detect", self.auto, ColumnsMessage::Auto),
+                mode("Delimiter", !self.auto, ColumnsMessage::Custom),
+            ]
+            .spacing(6),
+            column![
+                field_label("Split on"),
+                text_input("e.g. :", &self.delimiter)
+                    .id(COLUMNS_INPUT)
+                    .on_input(ColumnsMessage::Delimiter)
+                    .on_submit(ColumnsMessage::Apply)
+                    .font(theme::MONO)
+                    .padding([8, 10])
+                    .size(theme::MONO_SIZE)
+                    .style(theme::input),
+                presets,
+            ]
+            .spacing(6),
+            checkbox(self.hide_misfits)
+                .label("Hide lines that don't fit")
+                .on_toggle(ColumnsMessage::HideMisfits)
+                .size(16)
+                .text_size(theme::UI_SIZE)
+                .style(theme::check),
+            dialog_buttons(
+                "Show columns",
+                self.settings().map(|_| ColumnsMessage::Apply),
+                ColumnsMessage::Cancel,
+            ),
+        ]
+        .spacing(16);
+
+        dialog_card(360.0, body)
+    }
 }

@@ -9,11 +9,27 @@
 //!
 //! Lines that are mostly JSON objects get a column per top-level key instead, in the order the
 //! keys are first seen, with a message-like key moved last.
+//!
+//! Lines can also be split on a delimiter such as `:` or `|`, either one the user names or, when
+//! detecting, whichever of a few common ones gives the most columns. A leading timestamp is kept
+//! whole; after it the line is split into as many fields as most sampled lines have, the last
+//! taking the rest of the line, delimiters and all.
 
 use std::borrow::Cow;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::cancel::CancelToken;
+use crate::copy::copy_text_of;
+use crate::filter::FilterIndex;
+use crate::line_numbers::LineNumberList;
+use crate::log_file::LogFile;
 use crate::templates::{PrefixKind, PrefixShape};
 
 /// Share of sampled lines that must agree on a field's kind for it to become a column.
@@ -24,6 +40,10 @@ const MAX_FIELDS: usize = 6;
 const MAX_WIDTH: usize = 40;
 /// Space between rendered columns.
 pub const COLUMN_GAP: usize = 2;
+/// Most fields a delimited line is split into after its timestamp.
+const MAX_DELIMITED_FIELDS: usize = 20;
+/// Delimiters tried when detecting, besides whitespace.
+const AUTO_DELIMITERS: [&str; 4] = [":", "|", ";", ","];
 
 const LEVELS: [&str; 11] = [
     "TRACE", "DEBUG", "DBG", "INFO", "NOTICE", "WARN", "WARNING", "ERROR", "ERR", "FATAL",
@@ -55,6 +75,12 @@ enum Layout {
     },
     /// One JSON object per line; each header is a key.
     Json,
+    /// An optional timestamp, then `count` fields split on `delimiter`, the last taking the rest.
+    Delimited {
+        prefix: PrefixShape,
+        delimiter: String,
+        count: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -66,15 +92,39 @@ pub struct ColumnShape {
     pub widths: Vec<usize>,
 }
 
-/// Guesses a column layout from sample lines, or `None` when they don't share one worth showing
-/// (at least one column besides the message).
-pub fn detect_columns(sample: &[String]) -> Option<ColumnShape> {
+/// Finds a column layout in sample lines, or `None` when they don't share one worth showing (at
+/// least one column besides the message). With a `delimiter` the lines are split on it; without
+/// one the layout is guessed: JSON keys, whitespace-separated fields, or whichever common
+/// delimiter gives the most columns.
+pub fn detect_columns(sample: &[String], delimiter: Option<&str>) -> Option<ColumnShape> {
     if sample.is_empty() {
         return None;
+    }
+    if let Some(delimiter) = delimiter {
+        return detect_delimited_columns(sample, delimiter);
     }
     if let Some(shape) = detect_json_columns(sample) {
         return Some(shape);
     }
+    // On a tie the earlier wins, so whitespace fields beat a delimiter.
+    std::iter::once(detect_text_columns(sample))
+        .chain(
+            AUTO_DELIMITERS
+                .iter()
+                .map(|d| detect_delimited_columns(sample, d)),
+        )
+        .flatten()
+        .reduce(|best, shape| {
+            if shape.headers.len() > best.headers.len() {
+                shape
+            } else {
+                best
+            }
+        })
+}
+
+/// Whitespace-separated fields after an optional timestamp.
+fn detect_text_columns(sample: &[String]) -> Option<ColumnShape> {
     let bytes: Vec<Vec<u8>> = sample.iter().map(|l| l.as_bytes().to_vec()).collect();
     let prefix = PrefixShape::sniff(&bytes);
     let needed = (sample.len() as f64 * AGREEMENT).ceil() as usize;
@@ -168,6 +218,58 @@ fn detect_json_columns(sample: &[String]) -> Option<ColumnShape> {
     Some(fit_widths(Layout::Json, keys, sample))
 }
 
+/// `delimiter`-separated fields after an optional timestamp, as many as most lines have.
+fn detect_delimited_columns(sample: &[String], delimiter: &str) -> Option<ColumnShape> {
+    if delimiter.is_empty() {
+        return None;
+    }
+    let bytes: Vec<Vec<u8>> = sample.iter().map(|l| l.as_bytes().to_vec()).collect();
+    let prefix = PrefixShape::sniff(&bytes);
+    let needed = (sample.len() as f64 * AGREEMENT).ceil() as usize;
+
+    let fields: Vec<Vec<&str>> = sample
+        .iter()
+        .filter_map(|line| {
+            let rest = after_timestamp(prefix, line)?;
+            Some(split_delimited(rest, delimiter, MAX_DELIMITED_FIELDS))
+        })
+        .collect();
+    // The most fields that enough lines have; the last field takes whatever follows.
+    let count = (2..=MAX_DELIMITED_FIELDS)
+        .rev()
+        .find(|&n| fields.iter().filter(|f| f.len() >= n).count() >= needed)?;
+
+    let mut headers = Vec::new();
+    if prefix.kind != PrefixKind::None {
+        headers.push("time".to_string());
+    }
+    for position in 0..count - 1 {
+        let levels = fields
+            .iter()
+            .filter(|f| {
+                f.get(position)
+                    .is_some_and(|v| kind_of(v) == FieldKind::Level)
+            })
+            .count();
+        headers.push(if levels >= needed {
+            "level".to_string()
+        } else {
+            format!("col {}", headers.len() + 1)
+        });
+    }
+    headers.push("message".to_string());
+
+    Some(fit_widths(
+        Layout::Delimited {
+            prefix,
+            delimiter: delimiter.to_string(),
+            count,
+        },
+        headers,
+        sample,
+    ))
+}
+
 /// The shape with each column but the last as wide as its header and widest sampled value.
 fn fit_widths(layout: Layout, headers: Vec<String>, sample: &[String]) -> ColumnShape {
     let mut shape = ColumnShape {
@@ -194,6 +296,11 @@ impl ColumnShape {
         let (prefix, fields) = match &self.layout {
             Layout::Text { prefix, fields } => (*prefix, fields),
             Layout::Json => return self.split_json(line),
+            Layout::Delimited {
+                prefix,
+                delimiter,
+                count,
+            } => return split_delimited_line(*prefix, delimiter, *count, line),
         };
         let mut columns = Vec::with_capacity(self.headers.len());
         let rest = if prefix.kind == PrefixKind::None {
@@ -268,6 +375,51 @@ fn after_timestamp(prefix: PrefixShape, line: &str) -> Option<&str> {
         return None;
     }
     line.get(ts..)
+}
+
+/// A delimited line's timestamp and fields, or `None` when it has fewer than `count` fields.
+fn split_delimited_line<'a>(
+    prefix: PrefixShape,
+    delimiter: &str,
+    count: usize,
+    line: &'a str,
+) -> Option<Vec<Cow<'a, str>>> {
+    let mut columns = Vec::with_capacity(count + 1);
+    if prefix.kind != PrefixKind::None {
+        let ts = prefix.measure_timestamp(line.as_bytes(), line.len());
+        columns.push(Cow::Borrowed(line.get(..ts)?.trim_end()));
+    }
+    let fields = split_delimited(after_timestamp(prefix, line)?, delimiter, count);
+    if fields.len() < count {
+        return None;
+    }
+    columns.extend(fields.into_iter().map(Cow::Borrowed));
+    Some(columns)
+}
+
+/// `text` split on `delimiter` into at most `max` trimmed fields, the last holding the rest. A
+/// delimiter straight after the timestamp is skipped, and a whitespace delimiter takes runs of
+/// itself as one.
+fn split_delimited<'a>(text: &'a str, delimiter: &str, max: usize) -> Vec<&'a str> {
+    let collapse = delimiter.trim().is_empty();
+    let mut rest = text.trim_start();
+    rest = rest.strip_prefix(delimiter).unwrap_or(rest);
+    let mut out = Vec::new();
+    while out.len() + 1 < max {
+        let Some(at) = rest.find(delimiter) else {
+            break;
+        };
+        out.push(rest[..at].trim());
+        rest = &rest[at + delimiter.len()..];
+        if collapse {
+            rest = rest.trim_start();
+        }
+    }
+    let rest = rest.trim();
+    if !rest.is_empty() || !out.is_empty() {
+        out.push(rest);
+    }
+    out
 }
 
 /// The line as a JSON object, keys in their written order.
@@ -345,4 +497,111 @@ fn kind_of(field: &str) -> FieldKind {
         return FieldKind::Dotted;
     }
     FieldKind::Other
+}
+
+// ------------------------------------------------------------------ settings
+
+/// How the user wants lines split into columns. Saved in %APPDATA%\FastLogViewer beside
+/// tags.json.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnSettings {
+    /// What separates the columns; `None` to detect the layout.
+    pub delimiter: Option<String>,
+    /// Hide the lines that don't fit the layout while columns are shown.
+    pub hide_misfits: bool,
+}
+
+impl Default for ColumnSettings {
+    fn default() -> Self {
+        ColumnSettings {
+            delimiter: None,
+            hide_misfits: true,
+        }
+    }
+}
+
+fn settings_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("FastLogViewer").join("columns.json"))
+}
+
+impl ColumnSettings {
+    /// Corrupt or unreadable -> the defaults, never crash on startup.
+    pub fn load() -> Self {
+        settings_path()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    /// Best-effort persistence; a failed save only forgets the choice.
+    pub fn save(&self) {
+        let Some(path) = settings_path() else { return };
+        if let Some(dir) = path.parent() {
+            if fs::create_dir_all(dir).is_err() {
+                return;
+            }
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(path, json);
+        }
+    }
+}
+
+// ----------------------------------------------------------------- fit index
+
+/// The lines that fit a column layout, for hiding the rest. Built on a worker like `MatchIndex`.
+pub struct ColumnFitIndex {
+    lines: LineNumberList,
+    shape: Arc<ColumnShape>,
+    complete: AtomicBool,
+}
+
+impl ColumnFitIndex {
+    pub fn new(shape: Arc<ColumnShape>, file_length: u64) -> Self {
+        ColumnFitIndex {
+            lines: LineNumberList::new(file_length as i64),
+            shape,
+            complete: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete.load(Ordering::Acquire)
+    }
+
+    pub fn build(&self, f: &LogFile, ct: &CancelToken) {
+        while !f.index_complete() {
+            if ct.is_cancelled() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for line in 0..f.line_count() {
+            let text = copy_text_of(f, line);
+            if self
+                .shape
+                .split(text.trim_end_matches(['\r', '\n']))
+                .is_some()
+            {
+                self.lines.add(line as i32);
+            }
+            if (line & 0xFFF) == 0 && ct.is_cancelled() {
+                return;
+            }
+        }
+        self.complete.store(true, Ordering::Release);
+    }
+}
+
+impl FilterIndex for ColumnFitIndex {
+    fn count(&self) -> usize {
+        self.lines.count()
+    }
+    fn get(&self, i: usize) -> i32 {
+        self.lines.get(i)
+    }
+    fn index_at_or_after(&self, line: i32) -> usize {
+        self.lines.index_at_or_after(line)
+    }
 }

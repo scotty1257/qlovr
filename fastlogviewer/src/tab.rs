@@ -20,10 +20,10 @@ use std::time::{Duration, Instant, SystemTime};
 use fastlogviewer_core::{
     bucket_counts, bucket_start, copy_text_of, detect_columns, diff_logs, intersection_count,
     join_lines, load_notes, notes_path, parse_line_range, pin_line_notes, save_notes, CancelToken,
-    ChangeSet, ComplementIndex, FilterIndex, IntersectionIndex, Joined, LineDiff, LineNote,
-    LoadedNotes, LogFile, LogTemplate, LogViewMode, MatchIndex, Matcher, NotesFile, PatternNote,
-    PrefixShape, RecentFiles, SlotFilterIndex, SlotQuery, TagDef, TagStore, TemplateIndex,
-    UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
+    ChangeSet, ColumnFitIndex, ColumnSettings, ColumnShape, ComplementIndex, FilterIndex,
+    IntersectionIndex, Joined, LineDiff, LineNote, LoadedNotes, LogFile, LogTemplate, LogViewMode,
+    MatchIndex, Matcher, NotesFile, PatternNote, PrefixShape, RecentFiles, SlotFilterIndex,
+    SlotQuery, TagDef, TagStore, TemplateIndex, UnionFilterIndex, COPY_LIMIT_BYTES, TAG_PALETTE,
 };
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::scrollable::{Direction, Scrollbar};
@@ -39,8 +39,9 @@ use crate::log_view::{LogView, ViewMessage};
 use crate::notes_ui::{self, notes_panel, LineRow, NotesMessage, PatternRow};
 use crate::stats_ui::{stats_panel, StatsMessage, TagStat, STRIP_BUCKETS};
 use crate::tag_ui::{
-    self, copy_view, goto_view, modal, tag_chip, with_tip, ChipAction, CopyChoices, CopyMessage,
-    GotoMessage, PopupMessage, PopupOutcome, TagEditPopup,
+    self, copy_view, goto_view, modal, tag_chip, with_tip, ChipAction, ColumnsDialog,
+    ColumnsMessage, CopyChoices, CopyMessage, GotoMessage, PopupMessage, PopupOutcome,
+    TagEditPopup,
 };
 use crate::theme::{self, icons};
 
@@ -174,6 +175,7 @@ pub enum Message {
     TogglePatterns,
     ToggleWrap,
     ToggleColumns,
+    Columns(ColumnsMessage),
     GoTop,
     GoBottom,
     OpenDialog,
@@ -289,6 +291,12 @@ pub struct Tab {
     columns_wanted: bool,
     /// Which file the column layout was found for, by address.
     columns_for: usize,
+    column_settings: ColumnSettings,
+    columns_dialog: Option<ColumnsDialog>,
+    /// The lines that fit the column layout, while lines that don't are hidden.
+    column_fit: Option<Arc<ColumnFitIndex>>,
+    column_fit_ct: Option<CancelToken>,
+    last_fit_complete: bool,
 
     /// Each tab's search box needs its own id, or Ctrl+F would focus every pane's.
     search_input: Id,
@@ -366,6 +374,11 @@ impl Tab {
             templates_whole_file: false,
             columns_wanted: false,
             columns_for: 0,
+            column_settings: ColumnSettings::load(),
+            columns_dialog: None,
+            column_fit: None,
+            column_fit_ct: None,
+            last_fit_complete: false,
             search_input: Id::unique(),
             open_request: None,
             tags_changed: false,
@@ -652,6 +665,7 @@ impl Tab {
         self.release_notes();
         self.view.set_columns(None);
         self.columns_for = 0;
+        self.cancel_column_fit();
         self.cancel_clustering();
         self.cancel_slot_filter();
         self.zoom = None;
@@ -888,6 +902,18 @@ impl Tab {
             } else {
                 Some(zoomed)
             };
+        }
+
+        if let Some(fit) = self.column_fit.clone().filter(|f| f.is_complete()) {
+            let fit: Arc<dyn FilterIndex> = fit;
+            result = Some(match result {
+                Some(other) => Arc::new(IntersectionIndex::new(
+                    fit.as_ref(),
+                    other.as_ref(),
+                    file.length(),
+                )),
+                None => fit,
+            });
         }
 
         if self.changes_filter {
@@ -1791,8 +1817,9 @@ impl Tab {
     /// Lines sampled to find the column layout, spread evenly over the file.
     const COLUMN_SAMPLE: usize = 2000;
 
-    /// Finds the column layout for a newly indexed file while Columns is on. Turns Columns back
-    /// off, with a notice, when the file has no layout.
+    /// Finds the column layout for a newly indexed file while Columns is on, and starts finding
+    /// the lines that fit it when the rest are to be hidden. Turns Columns back off, with a
+    /// notice, when the file has no layout.
     fn sync_columns(&mut self, file: &Arc<LogFile>) {
         let file_key = Arc::as_ptr(file) as usize;
         if !self.columns_wanted || self.columns_for == file_key {
@@ -1805,14 +1832,87 @@ impl Tab {
             .step_by(step)
             .map(|line| copy_text_of(file, line))
             .collect();
-        match detect_columns(&sample) {
-            Some(shape) => self.view.set_columns(Some(Arc::new(shape))),
+        self.cancel_column_fit();
+        let delimiter = self.column_settings.delimiter.clone();
+        match detect_columns(&sample, delimiter.as_deref()) {
+            Some(shape) => {
+                let shape = Arc::new(shape);
+                self.view.set_columns(Some(shape.clone()));
+                if self.column_settings.hide_misfits {
+                    self.start_column_fit(file, shape);
+                }
+            }
             None => {
                 self.columns_wanted = false;
                 self.view.set_columns(None);
-                self.notify("No column layout found in this file", true);
+                let notice = match delimiter.as_deref() {
+                    Some(" ") => "No columns split by spaces in this file".to_string(),
+                    Some(d) => format!("No columns split by \"{d}\" in this file"),
+                    None => "No column layout found in this file".to_string(),
+                };
+                self.notify(notice, true);
             }
         }
+        self.recompute_active_filter();
+    }
+
+    fn start_column_fit(&mut self, file: &Arc<LogFile>, shape: Arc<ColumnShape>) {
+        let index = Arc::new(ColumnFitIndex::new(shape, file.length()));
+        self.column_fit = Some(index.clone());
+        let ct = CancelToken::new();
+        self.column_fit_ct = Some(ct.clone());
+        let file = file.clone();
+        std::thread::spawn(move || index.build(&file, &ct));
+    }
+
+    fn cancel_column_fit(&mut self) {
+        if let Some(ct) = self.column_fit_ct.take() {
+            ct.cancel();
+        }
+        self.column_fit = None;
+        // So the next fit finishing is seen as a change even if the last one had finished too.
+        self.last_fit_complete = false;
+    }
+
+    fn columns_off(&mut self) {
+        self.columns_wanted = false;
+        self.columns_for = 0;
+        self.view.set_columns(None);
+        self.cancel_column_fit();
+        self.recompute_active_filter();
+    }
+
+    fn apply_columns_message(&mut self, message: ColumnsMessage) -> Task<Message> {
+        let Some(dialog) = self.columns_dialog.as_mut() else {
+            return Task::none();
+        };
+        match message {
+            ColumnsMessage::Auto => dialog.auto = true,
+            ColumnsMessage::Custom => {
+                dialog.auto = false;
+                return operation::focus(tag_ui::COLUMNS_INPUT);
+            }
+            ColumnsMessage::Delimiter(delimiter) => {
+                dialog.auto = false;
+                dialog.delimiter = delimiter;
+            }
+            ColumnsMessage::HideMisfits(on) => dialog.hide_misfits = on,
+            ColumnsMessage::Apply => {
+                let Some(settings) = dialog.settings() else {
+                    return Task::none();
+                };
+                self.columns_dialog = None;
+                settings.save();
+                self.column_settings = settings;
+                self.columns_wanted = true;
+                self.columns_for = 0;
+                if let Some(file) = self.file.clone().filter(|f| f.index_complete()) {
+                    self.sync_columns(&file);
+                }
+            }
+            ColumnsMessage::Cancel => self.columns_dialog = None,
+        }
+        Task::none()
     }
 
     // ------------------------------------------------------------------- copy
@@ -2053,6 +2153,9 @@ impl Tab {
         if self.tag_union.as_ref().is_some_and(|u| !u.is_complete()) {
             busy = true;
         }
+        if self.column_fit.as_ref().is_some_and(|f| !f.is_complete()) {
+            busy = true;
+        }
         if self.tag_indexes.values().any(|i| !i.is_complete()) {
             busy = true;
         }
@@ -2060,13 +2163,16 @@ impl Tab {
         let ad_hoc_complete = self.matches.as_ref().is_some_and(|m| m.is_complete());
         let union_complete = self.tag_union.as_ref().is_some_and(|u| u.is_complete());
         let slot_complete = self.slot_filter.as_ref().is_some_and(|s| s.is_complete());
+        let fit_complete = self.column_fit.as_ref().is_some_and(|f| f.is_complete());
         if ad_hoc_complete != self.last_adhoc_complete
             || union_complete != self.last_union_complete
             || slot_complete != self.last_slot_complete
+            || fit_complete != self.last_fit_complete
         {
             self.last_adhoc_complete = ad_hoc_complete;
             self.last_union_complete = union_complete;
             self.last_slot_complete = slot_complete;
+            self.last_fit_complete = fit_complete;
             self.recompute_active_filter();
         }
 
@@ -2218,12 +2324,18 @@ impl Tab {
             Message::TogglePatterns => self.toggle_semantic_zoom(),
             Message::ToggleWrap => self.view.toggle_wrap_all(),
             Message::ToggleColumns => {
-                self.columns_wanted = !self.columns_wanted;
-                self.columns_for = 0;
-                if !self.columns_wanted {
-                    self.view.set_columns(None);
+                if self.columns_wanted {
+                    self.columns_off();
+                } else if self.file.is_some() {
+                    let dialog = ColumnsDialog::new(&self.column_settings);
+                    let auto = dialog.auto;
+                    self.columns_dialog = Some(dialog);
+                    if !auto {
+                        return operation::focus(tag_ui::COLUMNS_INPUT);
+                    }
                 }
             }
+            Message::Columns(message) => return self.apply_columns_message(message),
             Message::GoTop => self.view.go_to_start(),
             Message::GoBottom => self.view.go_to_end(),
             Message::OpenDialog => self.open_dialog(None),
@@ -2355,11 +2467,13 @@ impl Tab {
         modifiers: keyboard::Modifiers,
         captured: bool,
     ) -> Task<Message> {
-        if self.popup.is_some() || self.goto_open || self.copy_open {
+        if self.popup.is_some() || self.goto_open || self.copy_open || self.columns_dialog.is_some()
+        {
             if key == Key::Named(Named::Escape) {
                 self.popup = None;
                 self.close_goto();
                 self.close_copy();
+                self.columns_dialog = None;
             }
             return Task::none();
         }
@@ -2497,6 +2611,8 @@ impl Tab {
             };
             let dialog = copy_view(choices, &self.copy_range, self.copy_error.as_deref(), lines);
             stack![base, modal(dialog.map(Message::Copy))].into()
+        } else if let Some(dialog) = &self.columns_dialog {
+            stack![base, modal(dialog.view().map(Message::Columns))].into()
         } else {
             base.into()
         }
@@ -2717,7 +2833,7 @@ impl Tab {
             .padding([0, 12])
             .style(theme::toggle(self.columns_wanted))
             .on_press_maybe(has_file.then_some(Message::ToggleColumns)),
-            "Lay structured lines out in columns (time, level, …, or JSON keys)\nLines that don't fit are shown as they are",
+            "Lay structured lines out in columns (time, level, …, JSON keys, or split on a delimiter)",
             tooltip::Position::Bottom,
         );
 
