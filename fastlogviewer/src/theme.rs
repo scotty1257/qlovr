@@ -581,6 +581,27 @@ pub fn swatch(color: Color, selected: bool) -> impl Fn(&Theme, button::Status) -
     }
 }
 
+/// The "no colour" swatch: an outlined empty circle, ringed like the others when selected.
+pub fn swatch_none(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let ring = if selected {
+            palette().text_strong
+        } else if hovered {
+            alpha(palette().text_strong, 0.5)
+        } else {
+            palette().border_strong
+        };
+        button::Style {
+            background: Some(palette().raised.into()),
+            text_color: palette().text_dim,
+            border: border(ring, if selected { 2.0 } else { 1.0 }, 999.0),
+            shadow: Shadow::default(),
+            snap: true,
+        }
+    }
+}
+
 // --------------------------------------------------------------------- inputs
 
 pub fn input(_: &Theme, status: text_input::Status) -> text_input::Style {

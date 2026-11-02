@@ -30,7 +30,11 @@ pub struct TagDef {
     pub label: String,
     pub pattern: String,
     pub ignore_case: bool,
-    pub color_index: usize,
+    /// Background colour of highlighted matches, `None` for no background. Serialized under the
+    /// old name so tags saved before text colours existed keep their colour.
+    pub color_index: Option<usize>,
+    /// Text colour of highlighted matches, `None` to leave the text as it is.
+    pub text_color_index: Option<usize>,
     pub highlight_on: bool,
     pub filter_on: bool,
     /// Part of the severity ladder: level tags rank least to most severe in list order, and
@@ -48,7 +52,8 @@ impl Default for TagDef {
             label: String::new(),
             pattern: String::new(),
             ignore_case: false,
-            color_index: 0,
+            color_index: Some(0),
+            text_color_index: None,
             highlight_on: true,
             filter_on: false,
             level: false,
@@ -62,9 +67,25 @@ impl TagDef {
         self.matcher = Some(Arc::new(Matcher::new(&self.pattern, true, self.ignore_case)));
     }
 
+    /// The colour the tag is shown in (its chip, its stats bar): the background, else the text
+    /// colour, else the first palette colour.
     pub fn color(&self) -> [u8; 3] {
-        TAG_PALETTE[self.color_index % TAG_PALETTE.len()]
+        self.background()
+            .or(self.text_color())
+            .unwrap_or(TAG_PALETTE[0])
     }
+
+    pub fn background(&self) -> Option<[u8; 3]> {
+        self.color_index.map(palette_color)
+    }
+
+    pub fn text_color(&self) -> Option<[u8; 3]> {
+        self.text_color_index.map(palette_color)
+    }
+}
+
+fn palette_color(index: usize) -> [u8; 3] {
+    TAG_PALETTE[index % TAG_PALETTE.len()]
 }
 
 fn store_dir() -> Option<PathBuf> {
@@ -122,6 +143,7 @@ impl TagStore {
         highlight_on: bool,
         filter_on: bool,
         color_index: Option<usize>,
+        text_color_index: Option<usize>,
     ) -> usize {
         let mut tag = TagDef {
             label: label.to_string(),
@@ -129,7 +151,8 @@ impl TagStore {
             ignore_case,
             highlight_on,
             filter_on,
-            color_index: color_index.unwrap_or(self.tags.len() % TAG_PALETTE.len()),
+            color_index,
+            text_color_index,
             ..Default::default()
         };
         tag.rebuild_matcher();

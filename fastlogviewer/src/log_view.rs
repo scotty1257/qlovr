@@ -711,7 +711,9 @@ impl LogView {
             .as_ref()
             .is_some_and(|m| !m.is_empty() && m.is_valid());
         let mut ranges: Vec<i32> = Vec::with_capacity(64);
-        let mut tag_ranges: Vec<i32> = Vec::with_capacity(32);
+        // Each highlighting tag's matches on the current line, with its background and text
+        // colours.
+        let mut tag_hits: Vec<(Option<Color>, Option<Color>, Vec<i32>)> = Vec::new();
         let mut ink: Vec<Color> = Vec::new();
         let line_sel = self.selected_line_range();
         let text_sel = self.text_range();
@@ -845,6 +847,28 @@ impl LogView {
                 ..Text::default()
             });
 
+            tag_hits.clear();
+            for tag in &self.tags {
+                let Some(matcher) = tag
+                    .matcher
+                    .as_ref()
+                    .filter(|m| tag.highlight_on && !m.is_empty() && m.is_valid())
+                else {
+                    continue;
+                };
+                let rgb = |[r, g, b]: [u8; 3]| Color::from_rgb8(r, g, b);
+                let background = tag.background().map(|c| Color { a: 0.30, ..rgb(c) });
+                let foreground = tag.text_color().map(rgb);
+                if background.is_none() && foreground.is_none() {
+                    continue;
+                }
+                let mut hits = Vec::new();
+                matcher.append_ranges(&full, &mut hits);
+                if !hits.is_empty() {
+                    tag_hits.push((background, foreground, hits));
+                }
+            }
+
             ranges.clear();
             if highlight {
                 if let Some(m) = &self.matcher {
@@ -868,6 +892,13 @@ impl LogView {
             if let Some((start, len, color)) = level {
                 paint(start as i32, len as i32, color);
             }
+            for (_, foreground, hits) in &tag_hits {
+                if let Some(color) = foreground {
+                    for pair in hits.chunks_exact(2) {
+                        paint(pair[0], pair[1], *color);
+                    }
+                }
+            }
             let match_fg = if is_current {
                 theme::palette().cur_fg
             } else {
@@ -887,22 +918,11 @@ impl LogView {
                 let start = first_col + piece * piece_len;
 
                 // 0) tag highlight backgrounds, behind the ad-hoc search highlight
-                for tag in &self.tags {
-                    if !tag.highlight_on {
-                        continue;
-                    }
-                    let Some(matcher) = &tag.matcher else {
-                        continue;
-                    };
-                    if matcher.is_empty() || !matcher.is_valid() {
-                        continue;
-                    }
-                    tag_ranges.clear();
-                    matcher.append_ranges(&full, &mut tag_ranges);
-                    let [r8, g8, b8] = tag.color();
-                    let brush = Color::from_rgba8(r8, g8, b8, 0.30);
-                    for pair in tag_ranges.chunks_exact(2) {
-                        self.fill_columns(frame, pair, start, piece_len, y, brush);
+                for (background, _, hits) in &tag_hits {
+                    if let Some(brush) = background {
+                        for pair in hits.chunks_exact(2) {
+                            self.fill_columns(frame, pair, start, piece_len, y, *brush);
+                        }
                     }
                 }
 

@@ -2118,7 +2118,8 @@ impl Tab {
                     popup.ignore_case,
                     popup.highlight,
                     popup.filter,
-                    Some(popup.color_index),
+                    popup.color_index,
+                    popup.text_color_index,
                 );
                 self.tag_store.tags[index].level = popup.level;
                 self.tag_store.save();
@@ -2135,6 +2136,7 @@ impl Tab {
                     tag.highlight_on = popup.highlight;
                     tag.filter_on = popup.filter;
                     tag.color_index = popup.color_index;
+                    tag.text_color_index = popup.text_color_index;
                     tag.level = popup.level;
                     tag.rebuild_matcher();
                 }

@@ -171,7 +171,10 @@ pub enum PopupMessage {
     Level(bool),
     /// Move the tag one place left (-1) or right (+1) in the tag bar.
     Move(i64),
-    Color(usize),
+    /// Background colour; `None` for no background.
+    Color(Option<usize>),
+    /// Text colour; `None` to leave the text as it is.
+    TextColor(Option<usize>),
     Accept,
     Cancel,
 }
@@ -195,7 +198,8 @@ pub struct TagEditPopup {
     pub highlight: bool,
     pub filter: bool,
     pub level: bool,
-    pub color_index: usize,
+    pub color_index: Option<usize>,
+    pub text_color_index: Option<usize>,
 }
 
 impl TagEditPopup {
@@ -208,7 +212,8 @@ impl TagEditPopup {
             highlight: true,
             filter: false,
             level: false,
-            color_index: default_color_index,
+            color_index: Some(default_color_index),
+            text_color_index: None,
         }
     }
 
@@ -222,6 +227,7 @@ impl TagEditPopup {
             filter: tag.filter_on,
             level: tag.level,
             color_index: tag.color_index,
+            text_color_index: tag.text_color_index,
         }
     }
 
@@ -253,6 +259,7 @@ impl TagEditPopup {
             PopupMessage::Level(on) => self.level = on,
             PopupMessage::Move(delta) => return PopupOutcome::Move(delta),
             PopupMessage::Color(index) => self.color_index = index,
+            PopupMessage::TextColor(index) => self.text_color_index = index,
             PopupMessage::Accept if self.can_accept() => return PopupOutcome::Accepted,
             PopupMessage::Accept => {}
             PopupMessage::Cancel => return PopupOutcome::Cancelled,
@@ -291,18 +298,32 @@ impl TagEditPopup {
             .style(theme::toggle(self.ignore_case))
             .on_press(PopupMessage::ToggleIgnoreCase);
 
-        let swatches = row(TAG_PALETTE.iter().enumerate().map(|(i, [r, g, b])| {
-            button(space())
+        // A "none" swatch, then the palette.
+        let swatches = |selected: Option<usize>, pick: fn(Option<usize>) -> PopupMessage| {
+            let none = button(text("∅").size(13).font(theme::MONO).center())
                 .width(22)
                 .height(22)
-                .style(theme::swatch(
-                    Color::from_rgb8(*r, *g, *b),
-                    i == self.color_index,
-                ))
-                .on_press(PopupMessage::Color(i))
-                .into()
-        }))
-        .spacing(8);
+                .padding(0)
+                .style(theme::swatch_none(selected.is_none()))
+                .on_press(pick(None));
+            let none = with_tip(none, "None", tooltip::Position::Top);
+            row(
+                std::iter::once(none).chain(TAG_PALETTE.iter().enumerate().map(
+                    |(i, [r, g, b])| {
+                        button(space())
+                            .width(22)
+                            .height(22)
+                            .style(theme::swatch(
+                                Color::from_rgb8(*r, *g, *b),
+                                selected == Some(i),
+                            ))
+                            .on_press(pick(Some(i)))
+                            .into()
+                    },
+                )),
+            )
+            .spacing(8)
+        };
 
         let checkbox_row = row![
             checkbox(self.highlight)
@@ -373,7 +394,16 @@ impl TagEditPopup {
             .spacing(6),
             checkbox_row,
             position_row,
-            column![field_label("Colour"), swatches].spacing(8),
+            column![
+                field_label("Background"),
+                swatches(self.color_index, PopupMessage::Color),
+            ]
+            .spacing(8),
+            column![
+                field_label("Text"),
+                swatches(self.text_color_index, PopupMessage::TextColor),
+            ]
+            .spacing(8),
             space().height(2),
             dialog_buttons(
                 if self.editing.is_none() {
